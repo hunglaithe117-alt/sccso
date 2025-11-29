@@ -1,8 +1,9 @@
 import logging
+from collections import deque
 from datetime import datetime
 from pathlib import Path
-from threading import Lock, Thread
-from typing import Dict, List
+from threading import Condition, Lock, Thread
+from typing import Dict, List, Tuple
 from uuid import uuid4
 
 import pandas as pd
@@ -26,6 +27,8 @@ app = FastAPI(title="Mini Scanner UI", version="1.0.0")
 jobs: Dict[str, Dict] = {}
 uploads: Dict[str, Dict] = {}
 scan_lock = Lock()
+job_queue: deque[Tuple[str, Path, str]] = deque()
+queue_cv = Condition()
 
 
 def _load_uploads_from_db():
@@ -37,36 +40,47 @@ def _load_uploads_from_db():
 _load_uploads_from_db()
 
 
+def _job_worker():
+    while True:
+        with queue_cv:
+            while not job_queue:
+                queue_cv.wait()
+            job_id, csv_path, upload_id = job_queue.popleft()
+
+        jobs[job_id]["status"] = "running"
+        jobs[job_id]["started_at"] = datetime.utcnow().isoformat() + "Z"
+        if upload_id and upload_id in uploads:
+            uploads[upload_id]["status"] = "running"
+            uploads[upload_id]["job_id"] = job_id
+            scanner.checkpoint.update_upload_status(upload_id, status="running", job_id=job_id)
+
+        try:
+            scanner.check_dependencies()
+            with scan_lock:
+                scanner.process_csv(csv_path)
+            jobs[job_id]["status"] = "completed"
+            jobs[job_id]["completed_at"] = datetime.utcnow().isoformat() + "Z"
+            if upload_id and upload_id in uploads:
+                uploads[upload_id]["status"] = "completed"
+                uploads[upload_id]["job_id"] = job_id
+                scanner.checkpoint.update_upload_status(upload_id, status="completed", job_id=job_id, error=None)
+        except Exception as exc:
+            logger.exception("Scan failed", exc_info=exc)
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = str(exc)
+            jobs[job_id]["completed_at"] = datetime.utcnow().isoformat() + "Z"
+            if upload_id and upload_id in uploads:
+                uploads[upload_id]["status"] = "error"
+                uploads[upload_id]["error"] = str(exc)
+                uploads[upload_id]["job_id"] = job_id
+                scanner.checkpoint.update_upload_status(upload_id, status="error", job_id=job_id, error=str(exc))
+
+
+Thread(target=_job_worker, daemon=True).start()
+
+
 def _sanitize_filename(filename: str) -> str:
     return Path(filename).name or "upload.csv"
-
-
-def _run_scan(job_id: str, csv_path: Path, upload_id: str = None):
-    """
-    Run the scan in a background thread to keep the API responsive.
-    """
-    jobs[job_id]["status"] = "running"
-    jobs[job_id]["started_at"] = datetime.utcnow().isoformat() + "Z"
-    try:
-        scanner.check_dependencies()
-        with scan_lock:
-            scanner.process_csv(csv_path)
-        jobs[job_id]["status"] = "completed"
-        jobs[job_id]["completed_at"] = datetime.utcnow().isoformat() + "Z"
-        if upload_id and upload_id in uploads:
-            uploads[upload_id]["status"] = "completed"
-            uploads[upload_id]["job_id"] = job_id
-            scanner.checkpoint.update_upload_status(upload_id, status="completed", job_id=job_id, error=None)
-    except Exception as exc:
-        logger.exception("Scan failed", exc_info=exc)
-        jobs[job_id]["status"] = "error"
-        jobs[job_id]["error"] = str(exc)
-        jobs[job_id]["completed_at"] = datetime.utcnow().isoformat() + "Z"
-        if upload_id and upload_id in uploads:
-            uploads[upload_id]["status"] = "error"
-            uploads[upload_id]["error"] = str(exc)
-            uploads[upload_id]["job_id"] = job_id
-            scanner.checkpoint.update_upload_status(upload_id, status="error", job_id=job_id, error=str(exc))
 
 
 def start_scan(csv_path: Path, upload_id: str = None) -> str:
@@ -77,7 +91,9 @@ def start_scan(csv_path: Path, upload_id: str = None) -> str:
         "created_at": datetime.utcnow().isoformat() + "Z",
         "upload_id": upload_id,
     }
-    Thread(target=_run_scan, args=(job_id, csv_path, upload_id), daemon=True).start()
+    with queue_cv:
+        job_queue.append((job_id, csv_path, upload_id))
+        queue_cv.notify()
     return job_id
 
 
@@ -248,11 +264,11 @@ async def index():
       <div class="flex-between">
         <div>
           <label>Uploads</label>
-          <p class="muted" style="margin:4px 0 0;">Danh sách repo/commit trong các CSV đã tải. Nhấn Scan để chạy từng file, hoặc Scan tất cả.</p>
+          <p class="muted" style="margin:4px 0 0;">Danh sách repo/commit trong các CSV đã tải. Nhấn Thu thập để lấy danh sách, Scan để chạy từng file, hoặc Scan tất cả (chạy tuần tự).</p>
         </div>
         <div class="row" style="gap:8px;">
           <button id="scan-all-btn">Scan tất cả chưa chạy</button>
-          <span class="refresh" id="refresh-uploads">↻ Làm mới</span>
+          <span class="refresh" id="refresh-uploads">↻ Thu thập</span>
         </div>
       </div>
       <div style="overflow-x:auto;">
