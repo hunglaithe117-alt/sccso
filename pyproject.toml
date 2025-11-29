@@ -1,0 +1,17 @@
+[project]
+name = "scan"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pandas",
+    "requests",
+    "pymongo",
+    "pydantic",
+    "pyyaml",
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+    "jinja2",
+]
