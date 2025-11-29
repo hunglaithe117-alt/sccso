@@ -120,7 +120,7 @@ async def index():
       transition: transform 0.08s ease, box-shadow 0.1s ease;
     }
     button:active { transform: translateY(1px); box-shadow: 0 4px 12px rgba(0,0,0,0.35); }
-    .row { display: flex; align-items: center; gap: 10px; }
+    .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     input[type="checkbox"] { width: 18px; height: 18px; }
     .status {
       background: #0b1221;
@@ -133,8 +133,34 @@ async def index():
       white-space: pre-wrap;
       min-height: 48px;
     }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      text-align: left;
+    }
+    th { color: var(--muted); font-size: 14px; }
+    tr:last-child td { border-bottom: none; }
+    .pill {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #04101f;
+    }
+    .pill.success { background: #34d399; }
+    .pill.fail { background: #f87171; }
+    .pill.pending { background: #fbbf24; }
+    .pill.total { background: #93c5fd; }
     .muted { color: var(--muted); font-size: 14px; }
     a { color: var(--accent); }
+    .flex-between { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+    .refresh { font-size: 13px; cursor: pointer; color: var(--accent); }
   </style>
 </head>
 <body>
@@ -162,6 +188,31 @@ async def index():
       <div id="job-status" class="status"></div>
     </div>
 
+    <div class="block">
+      <div class="flex-between">
+        <div>
+          <label>Trạng thái từng repo</label>
+          <p class="muted" style="margin:4px 0 0;">Hiển thị số commit theo repo (done / failed / pending). Tự động làm mới mỗi 3 giây.</p>
+        </div>
+        <span class="refresh" id="refresh-btn">↻ Làm mới</span>
+      </div>
+      <div id="repo-summary" class="status" style="min-height: 32px;">Đang tải...</div>
+      <div style="overflow-x:auto;">
+        <table id="repo-table">
+          <thead>
+            <tr>
+              <th>Repo</th>
+              <th>Tổng</th>
+              <th>Thành công</th>
+              <th>Thất bại</th>
+              <th>Đang chạy</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
     <p class="muted">Work dir: {work_dir}</p>
   </div>
 
@@ -170,6 +221,9 @@ async def index():
     const uploadResult = document.getElementById('upload-result');
     const jobStatus = document.getElementById('job-status');
     const jobIdInput = document.getElementById('job-id');
+    const repoSummaryEl = document.getElementById('repo-summary');
+    const repoTableBody = document.querySelector('#repo-table tbody');
+    const refreshBtn = document.getElementById('refresh-btn');
 
     function showStatus(el, msg, error=false) {
       el.textContent = msg;
@@ -236,6 +290,51 @@ async def index():
         showStatus(jobStatus, `Error: ${err}`, true);
       }
     }
+
+    async function loadRepoSummary() {
+      repoSummaryEl.textContent = 'Đang tải...';
+      try {
+        const res = await fetch('/api/repos');
+        if (!res.ok) {
+          const txt = await res.text();
+          repoSummaryEl.textContent = `Lỗi: ${txt}`;
+          return;
+        }
+        const data = await res.json();
+        const totals = data.reduce((acc, row) => {
+          acc.total += row.total;
+          acc.processed += row.processed;
+          acc.failed += row.failed;
+          acc.pending += row.pending;
+          return acc;
+        }, { total:0, processed:0, failed:0, pending:0 });
+        repoSummaryEl.textContent = `Tổng: ${totals.total} | Thành công: ${totals.processed} | Thất bại: ${totals.failed} | Đang chạy: ${totals.pending}`;
+
+        repoTableBody.innerHTML = '';
+        if (!data.length) {
+          repoTableBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);">Chưa có dữ liệu</td></tr>';
+          return;
+        }
+
+        data.forEach(row => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${row.repo_name || '(unknown)'}</td>
+            <td><span class="pill total">${row.total}</span></td>
+            <td><span class="pill success">${row.processed}</span></td>
+            <td><span class="pill fail">${row.failed}</span></td>
+            <td><span class="pill pending">${row.pending}</span></td>
+          `;
+          repoTableBody.appendChild(tr);
+        });
+      } catch (err) {
+        repoSummaryEl.textContent = `Error: ${err}`;
+      }
+    }
+
+    refreshBtn.addEventListener('click', loadRepoSummary);
+    loadRepoSummary();
+    setInterval(loadRepoSummary, 3000);
   </script>
 </body>
 </html>
@@ -283,3 +382,11 @@ async def get_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return JSONResponse(job)
+
+
+@app.get("/api/repos")
+async def repo_summary():
+    """
+    Return aggregate commit counts per repo using the checkpoint DB.
+    """
+    return JSONResponse(scanner.checkpoint.get_repo_summary())

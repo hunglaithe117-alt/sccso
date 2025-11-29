@@ -37,11 +37,11 @@ services:
     env_file:
       - .env
     environment:
-      - SONAR_HOST_URL=http://sonarqube:9000
-      - SONAR_TOKEN=admin  # Change this after setting up SonarQube
-      - GITHUB_TOKENS=  # Add your tokens here, comma separated
-      - CONCURRENT_SCANS=4
-      - BATCH_SIZE=50
+      - SONAR_HOST_URL
+      - SONAR_TOKEN
+      - GITHUB_TOKENS
+      - CONCURRENT_SCANS
+      - BATCH_SIZE
       - WORK_DIR=/app/work_dir
       - SONAR_SCANNER_OPTS=-Xmx512m
     depends_on:

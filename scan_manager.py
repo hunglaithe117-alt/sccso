@@ -214,7 +214,7 @@ class MiniScanner:
             f"-Dsonar.projectVersion={commit_sha}",
             "-Dsonar.sources=.",
             f"-Dsonar.host.url={Config.SONAR_HOST_URL}",
-            f"-Dsonar.token={Config.SONAR_TOKEN}",
+            f"-Dsonar.login={Config.SONAR_TOKEN}",
             "-Dsonar.scm.disabled=true",  # Disable SCM sensor to avoid issues with detached HEAD or shallow clones if any
             "-Dsonar.java.binaries=.",  # Assuming Java, but this might need adjustment for other languages
         ]
@@ -247,7 +247,12 @@ class MiniScanner:
         project_key = row.get("project_key", f"{repo_name}_{commit_sha}")
 
         # Claim the commit to avoid duplicate processing across workers
-        if not self.checkpoint.try_claim_commit(commit_sha):
+        if not self.checkpoint.try_claim_commit(
+            commit_sha,
+            repo_name=repo_name,
+            project_key=project_key,
+            repo_url=repo_url,
+        ):
             logger.debug(f"Skipping {project_key} (already processed or pending)")
             return True
 
@@ -269,15 +274,32 @@ class MiniScanner:
             success = self.run_sonar_scan(workspace_path, project_key, commit_sha)
 
             if success:
-                self.checkpoint.mark_processed(commit_sha)
+                self.checkpoint.mark_processed(
+                    commit_sha,
+                    repo_name=repo_name,
+                    project_key=project_key,
+                    repo_url=repo_url,
+                )
                 return True
             else:
-                self.checkpoint.mark_failed(commit_sha, "Scanner command failed")
+                self.checkpoint.mark_failed(
+                    commit_sha,
+                    "Scanner command failed",
+                    repo_name=repo_name,
+                    project_key=project_key,
+                    repo_url=repo_url,
+                )
                 return False
 
         except Exception as e:
             logger.error(f"Failed to process {project_key}: {e}")
-            self.checkpoint.mark_failed(commit_sha, str(e))
+            self.checkpoint.mark_failed(
+                commit_sha,
+                str(e),
+                repo_name=repo_name,
+                project_key=project_key,
+                repo_url=repo_url,
+            )
             return False
         finally:
             # Cleanup workspace
