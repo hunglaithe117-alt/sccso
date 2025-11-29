@@ -3,6 +3,7 @@ import shutil
 import logging
 import pandas as pd
 import os
+import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import Config
@@ -24,7 +25,18 @@ class MiniScanner:
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         
         self.checkpoint = CheckpointManager(Config.CHECKPOINT_FILE)
-        self.github = GitHubAPI(Config.GITHUB_TOKENS) if Config.GITHUB_TOKENS else None
+        tokens = [t for t in Config.GITHUB_TOKENS if t.strip()]
+        self.github = GitHubAPI(tokens) if tokens else None
+
+        # Lock per repo to avoid concurrent clone/fetch into the same path
+        self._repo_locks: dict[str, threading.Lock] = {}
+        self._repo_locks_lock = threading.Lock()
+
+    def _get_repo_lock(self, repo_name: str) -> threading.Lock:
+        with self._repo_locks_lock:
+            if repo_name not in self._repo_locks:
+                self._repo_locks[repo_name] = threading.Lock()
+            return self._repo_locks[repo_name]
 
     def run_command(self, cmd, cwd=None, allow_fail=False):
         # logger.debug(f"Running command: {' '.join(cmd)}")
@@ -50,20 +62,17 @@ class MiniScanner:
         Ensures the 'master' copy of the repo exists in repos_dir.
         """
         repo_path = self.repos_dir / repo_name
-        if not repo_path.exists():
-            logger.info(f"Cloning {repo_url} to {repo_path}")
-            self.run_command(["git", "clone", repo_url, str(repo_path)])
-        else:
-            # logger.info(f"Repo {repo_name} exists. Fetching updates...")
-            # We can skip fetch if we assume we have what we need, or fetch periodically.
-            # For concurrency, multiple threads might try to fetch same repo. 
-            # Ideally we should lock this, but git handles concurrent fetches somewhat okay, 
-            # or we can just ignore errors if it's busy.
-            # For now, let's assume we fetch once or just try.
-            try:
-                self.run_command(["git", "fetch", "--all"], cwd=repo_path, allow_fail=True)
-            except Exception:
-                pass
+        repo_lock = self._get_repo_lock(repo_name)
+        with repo_lock:
+            if not repo_path.exists():
+                logger.info(f"Cloning {repo_url} to {repo_path}")
+                self.run_command(["git", "clone", repo_url, str(repo_path)])
+            else:
+                # Single-threaded fetch to avoid collision when many jobs target same repo
+                try:
+                    self.run_command(["git", "fetch", "--all"], cwd=repo_path, allow_fail=True)
+                except Exception:
+                    pass
         return repo_path
 
     def prepare_workspace(self, repo_name, project_key):
