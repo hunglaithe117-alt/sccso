@@ -34,4 +34,6 @@ COPY . .
 # Create work directories
 RUN mkdir -p /app/work_dir/repos && chmod -R 777 /app/work_dir
 
-CMD ["python3", "scan_manager.py", "--help"]
+EXPOSE 8000
+
+CMD ["uvicorn", "webapp:app", "--host", "0.0.0.0", "--port", "8000"]

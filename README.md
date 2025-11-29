@@ -25,21 +25,28 @@ This is a tool to perform batch scanning of git repositories at specific commits
     *   Access SonarQube at [http://localhost:9000](http://localhost:9000) (Default: `admin` / `admin`).
     *   **Note:** Wait for SonarQube to fully start before running scans.
 
-3.  **Prepare Data:**
-    Place your CSV file (e.g., `commits.csv`) in the `work_dir/` folder. This folder is mounted into the scanner container.
+3.  **Use the web UI (no CLI needed):**
+    Open [http://localhost:8000](http://localhost:8000) and drop a CSV. The UI will upload it into `work_dir/uploads/` inside the container and can start a scan immediately. You can paste the returned Job ID to poll status.
     
-    **CSV Format:**
-    ```csv
-    repo_url,commit_sha,project_key
-    https://github.com/user/repo.git,abcdef123456,my_project_key
-    ```
-    *   `project_key` is optional; if omitted, it defaults to `repo_name_commit_sha`.
+    **API endpoints (served by the scanner container):**
+    *   `POST /api/upload` (form-data: `file`, `scan_now=true|false`) → saves CSV to `/app/work_dir/uploads/...` and optionally starts a scan, returns `job_id`.
+    *   `GET /api/jobs/{job_id}` → current status for that job.
+    *   `GET /api/jobs` → list all tracked jobs (in-memory).
 
-4.  **Run Scan:**
-    Execute the scanner inside the running container:
-    ```bash
-    docker-compose exec scanner python3 scan_manager.py work_dir/commits.csv
-    ```
+4.  **(Optional) CLI flow:**
+    Place your CSV file (e.g., `commits.csv`) in the `work_dir/` folder at the repo root. This folder is mounted into the scanner container at `/app/work_dir`.
+    *   Verify the mount from inside the container (only lists files, does not run scans):
+        ```bash
+        docker-compose exec scanner python3 scan_manager.py --list-workdir
+        ```
+    *   Run the scanner manually:
+        ```bash
+        docker-compose exec scanner python3 scan_manager.py work_dir/commits.csv
+        ```
+        Or, if `INPUT_CSV` is set in `.env` (pointing to a file in `work_dir/`):
+        ```bash
+        docker-compose exec scanner python3 scan_manager.py
+        ```
 
 ## Local Development Setup
 
@@ -78,7 +85,9 @@ You can configure the scanner via environment variables or `.env` file (for Dock
 | `GITHUB_TOKENS` | Comma-separated GitHub tokens for API access | (Empty) |
 | `CONCURRENT_SCANS` | Number of parallel scans to run | `4` |
 | `BATCH_SIZE` | Number of rows to read/process at a time | `50` |
-| `CHECKPOINT_FILE` | File to store progress | `scan_checkpoint.json` |
+| `CHECKPOINT_FILE` | File to store progress (relative paths resolve inside `WORK_DIR`) | `work_dir/scan_checkpoint.json` |
+| `WORK_DIR` | Location for temporary repos, checkpoints, and CSV input (mounted for Docker) | `<repo>/work_dir` (overridden to `/app/work_dir` in docker-compose) |
+| `INPUT_CSV` | Default CSV file name/path to use when no CLI arg is provided | `commits_to_scan.csv` |
 
 ## Checkpoints
 

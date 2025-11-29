@@ -45,9 +45,10 @@ services:
       - WORK_DIR=/app/work_dir
     depends_on:
       - sonarqube
+    ports:
+      - "8000:8000"
     volumes:
       - ./work_dir:/app/work_dir
-    command: tail -f /dev/null
 
 volumes:
   sonarqube_data:

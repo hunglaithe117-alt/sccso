@@ -2,9 +2,9 @@ import subprocess
 import shutil
 import logging
 import pandas as pd
-import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from config import Config
 from checkpoint import CheckpointManager
 from pipeline.github_api import GitHubAPI
@@ -29,9 +29,15 @@ class MiniScanner:
         self.repos_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir = self.work_dir / "temp"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.repo_locks = {}
 
         self.checkpoint = CheckpointManager(Config.CHECKPOINT_FILE)
         self.github = GitHubAPI(Config.GITHUB_TOKENS) if Config.GITHUB_TOKENS else None
+
+    def _get_repo_lock(self, repo_name):
+        if repo_name not in self.repo_locks:
+            self.repo_locks[repo_name] = Lock()
+        return self.repo_locks[repo_name]
 
     def run_command(self, cmd, cwd=None, allow_fail=False):
         # logger.debug(f"Running command: {' '.join(cmd)}")
@@ -304,19 +310,3 @@ class MiniScanner:
                 logger.info(f"--- Completed Batch {batch_idx + 1} ---")
         except Exception as e:
             logger.error(f"Failed to process CSV {csv_path}: {e}")
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Mini SonarQube Scanner Pipeline (Batch)"
-    )
-    parser.add_argument(
-        "csv_file", help="Path to the CSV file containing repo and commit info"
-    )
-    args = parser.parse_args()
-
-    scanner = MiniScanner()
-    scanner.check_dependencies()
-    scanner.process_csv(args.csv_file)
