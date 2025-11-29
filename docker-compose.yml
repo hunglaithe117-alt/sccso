@@ -43,6 +43,7 @@ services:
       - CONCURRENT_SCANS=4
       - BATCH_SIZE=50
       - WORK_DIR=/app/work_dir
+      - SONAR_SCANNER_OPTS=-Xmx512m
     depends_on:
       - sonarqube
     ports:

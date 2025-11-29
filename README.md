@@ -85,9 +85,16 @@ You can configure the scanner via environment variables or `.env` file (for Dock
 | `GITHUB_TOKENS` | Comma-separated GitHub tokens for API access | (Empty) |
 | `CONCURRENT_SCANS` | Number of parallel scans to run | `4` |
 | `BATCH_SIZE` | Number of rows to read/process at a time | `50` |
-| `CHECKPOINT_FILE` | File to store progress (relative paths resolve inside `WORK_DIR`) | `work_dir/scan_checkpoint.json` |
+| `CHECKPOINT_FILE` | SQLite DB file to store progress (relative paths resolve inside `WORK_DIR`) | `work_dir/scan_checkpoint.db` |
 | `WORK_DIR` | Location for temporary repos, checkpoints, and CSV input (mounted for Docker) | `<repo>/work_dir` (overridden to `/app/work_dir` in docker-compose) |
 | `INPUT_CSV` | Default CSV file name/path to use when no CLI arg is provided | `commits_to_scan.csv` |
+| `SONAR_SCANNER_OPTS` | JVM options for sonar-scanner (memory cap) | `-Xmx512m` (set in `docker-compose.yml`) |
+
+### Concurrency & cleanup
+- Repo operations use file-based locks under `work_dir/locks/` so multiple processes/containers can share the same volume safely.
+- Checkpoints are stored in SQLite with WAL mode; each commit is claimed atomically (`PENDING`), preventing duplicate scans across threads/containers. Pending jobs from previous crashes are cleared at startup.
+- Temporary worktrees in `work_dir/temp/` are cleaned on startup and `git worktree prune` is run per repo to remove stale metadata from previous runs.
+- A single thread pool is reused across batches to avoid head-of-line blocking when one job is slow.
 
 ## Checkpoints
 

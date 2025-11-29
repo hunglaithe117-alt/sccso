@@ -4,7 +4,7 @@ import logging
 import pandas as pd
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
+from filelock import FileLock
 from config import Config
 from checkpoint import CheckpointManager
 from pipeline.github_api import GitHubAPI
@@ -29,15 +29,49 @@ class MiniScanner:
         self.repos_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir = self.work_dir / "temp"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
-        self.repo_locks = {}
+        self.locks_dir = self.work_dir / "locks"
+        self.locks_dir.mkdir(parents=True, exist_ok=True)
 
         self.checkpoint = CheckpointManager(Config.CHECKPOINT_FILE)
+        self.checkpoint.reset_pending_jobs()
         self.github = GitHubAPI(Config.GITHUB_TOKENS) if Config.GITHUB_TOKENS else None
+        self.cleanup_stale_worktrees()
 
     def _get_repo_lock(self, repo_name):
-        if repo_name not in self.repo_locks:
-            self.repo_locks[repo_name] = Lock()
-        return self.repo_locks[repo_name]
+        return FileLock(str(self.locks_dir / f"{repo_name}.lock"), timeout=600)
+
+    def cleanup_stale_worktrees(self):
+        """
+        Remove leftover temp worktrees and prune git metadata from previous runs.
+        """
+        startup_lock = FileLock(str(self.locks_dir / "startup.lock"), timeout=60)
+        with startup_lock:
+            # Clean temp worktrees
+            if self.temp_dir.exists():
+                for child in self.temp_dir.iterdir():
+                    try:
+                        if child.is_dir():
+                            shutil.rmtree(child, ignore_errors=True)
+                        else:
+                            child.unlink(missing_ok=True)
+                    except Exception as e:
+                        logger.warning(f"Failed to clean temp entry {child}: {e}")
+
+            # Prune worktree metadata for each repo
+            if self.repos_dir.exists():
+                for repo_dir in self.repos_dir.iterdir():
+                    if not repo_dir.is_dir():
+                        continue
+                    git_dir = repo_dir / ".git"
+                    if not git_dir.exists():
+                        continue
+                    try:
+                        with self._get_repo_lock(repo_dir.name):
+                            self.run_command(
+                                ["git", "worktree", "prune"], cwd=repo_dir, allow_fail=True
+                            )
+                    except Exception as e:
+                        logger.warning(f"Failed to prune worktrees for {repo_dir}: {e}")
 
     def run_command(self, cmd, cwd=None, allow_fail=False):
         # logger.debug(f"Running command: {' '.join(cmd)}")
@@ -212,8 +246,9 @@ class MiniScanner:
         repo_name = repo_url.split("/")[-1].replace(".git", "")
         project_key = row.get("project_key", f"{repo_name}_{commit_sha}")
 
-        if self.checkpoint.is_processed(commit_sha):
-            logger.info(f"Skipping {project_key} (already processed)")
+        # Claim the commit to avoid duplicate processing across workers
+        if not self.checkpoint.try_claim_commit(commit_sha):
+            logger.debug(f"Skipping {project_key} (already processed or pending)")
             return True
 
         workspace_path = None
@@ -263,50 +298,49 @@ class MiniScanner:
         logger.info(f"Processing {csv_path} in batches of {batch_size}")
 
         try:
-            for batch_idx, df_chunk in enumerate(
-                pd.read_csv(csv_path, chunksize=batch_size)
-            ):
-                logger.info(f"--- Starting Batch {batch_idx + 1} ---")
-                logger.debug(f"Batch columns: {df_chunk.columns.tolist()}")
-                rows = df_chunk.to_dict("records")
-                logger.debug(f"Number of rows in batch: {len(rows)}")
-                if rows:
-                    logger.debug(f"First row: {rows[0]}")
+            futures = []
+            with ThreadPoolExecutor(max_workers=Config.CONCURRENT_SCANS) as executor:
+                for batch_idx, df_chunk in enumerate(
+                    pd.read_csv(csv_path, chunksize=batch_size)
+                ):
+                    logger.info(f"--- Starting Batch {batch_idx + 1} ---")
+                    logger.debug(f"Batch columns: {df_chunk.columns.tolist()}")
+                    rows = df_chunk.to_dict("records")
+                    logger.debug(f"Number of rows in batch: {len(rows)}")
+                    if rows:
+                        logger.debug(f"First row: {rows[0]}")
 
-                # Pre-ensure repos for this batch to avoid concurrent clones
-                repos_to_prepare = {}
-                for row in rows:
-                    gh_project_name = row.get("gh_project_name")
-                    repo_url = row.get("repo_url")
-                    if gh_project_name and not repo_url:
-                        repo_url = f"https://github.com/{gh_project_name}.git"
-                    if not repo_url:
-                        continue
-                    repo_name = repo_url.split("/")[-1].replace(".git", "")
-                    repos_to_prepare[repo_url] = repo_name
+                    # Pre-ensure repos for this batch to avoid concurrent clones
+                    repos_to_prepare = {}
+                    for row in rows:
+                        gh_project_name = row.get("gh_project_name")
+                        repo_url = row.get("repo_url")
+                        if gh_project_name and not repo_url:
+                            repo_url = f"https://github.com/{gh_project_name}.git"
+                        if not repo_url:
+                            continue
+                        repo_name = repo_url.split("/")[-1].replace(".git", "")
+                        repos_to_prepare[repo_url] = repo_name
 
-                for repo_url, repo_name in repos_to_prepare.items():
-                    try:
-                        self.ensure_repo(repo_url, repo_name)
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to prepare repo {repo_name} ({repo_url}): {e}"
-                        )
-
-                with ThreadPoolExecutor(
-                    max_workers=Config.CONCURRENT_SCANS
-                ) as executor:
-                    futures = {
-                        executor.submit(self.process_single_job, row): row
-                        for row in rows
-                    }
-
-                    for future in as_completed(futures):
+                    for repo_url, repo_name in repos_to_prepare.items():
                         try:
-                            future.result()
+                            self.ensure_repo(repo_url, repo_name)
                         except Exception as e:
-                            logger.error(f"Job failed with exception: {e}")
+                            logger.error(
+                                f"Failed to prepare repo {repo_name} ({repo_url}): {e}"
+                            )
 
-                logger.info(f"--- Completed Batch {batch_idx + 1} ---")
+                    for row in rows:
+                        futures.append(executor.submit(self.process_single_job, row))
+
+                    logger.info(f"--- Scheduled Batch {batch_idx + 1} ({len(rows)} jobs) ---")
+
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error(f"Job failed with exception: {e}")
+
+            logger.info("--- All batches scheduled and completed ---")
         except Exception as e:
             logger.error(f"Failed to process CSV {csv_path}: {e}")

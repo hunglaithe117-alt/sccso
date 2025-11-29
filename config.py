@@ -27,5 +27,5 @@ class Config:
             else str(Path(WORK_DIR) / _checkpoint_path)
         )
     else:
-        CHECKPOINT_FILE = str(Path(WORK_DIR) / "scan_checkpoint.json")
+        CHECKPOINT_FILE = str(Path(WORK_DIR) / "scan_checkpoint.db")
     INPUT_CSV = os.getenv("INPUT_CSV", "commits_to_scan.csv")
