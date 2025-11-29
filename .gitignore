@@ -11,3 +11,5 @@ wheels/
 
 # Scanner working directory
 work_dir/
+
+.env
