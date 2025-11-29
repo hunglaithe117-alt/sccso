@@ -27,7 +27,6 @@ ENV PATH="/opt/sonar-scanner/bin:${PATH}"
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install fastapi uvicorn
 
 # Copy app code
 COPY . .
@@ -35,6 +34,4 @@ COPY . .
 # Create work directories
 RUN mkdir -p /app/work_dir/repos && chmod -R 777 /app/work_dir
 
-EXPOSE 8000
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python3", "scan_manager.py", "--help"]
