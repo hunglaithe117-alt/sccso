@@ -57,37 +57,48 @@ class MiniScanner:
         Ensures the 'master' copy of the repo exists in repos_dir.
         """
         repo_path = self.repos_dir / repo_name
-        if not repo_path.exists():
-            logger.info(f"Cloning {repo_url} to {repo_path}")
-            self.run_command(["git", "clone", repo_url, str(repo_path)])
-        else:
-            # logger.info(f"Repo {repo_name} exists. Fetching updates...")
-            # We can skip fetch if we assume we have what we need, or fetch periodically.
-            # For concurrency, multiple threads might try to fetch same repo.
-            # Ideally we should lock this, but git handles concurrent fetches somewhat okay,
-            # or we can just ignore errors if it's busy.
-            # For now, let's assume we fetch once or just try.
-            try:
-                self.run_command(
-                    ["git", "fetch", "--all"], cwd=repo_path, allow_fail=True
-                )
-            except Exception:
-                pass
+        repo_lock = self._get_repo_lock(repo_name)
+        with repo_lock:
+            if not repo_path.exists():
+                logger.info(f"Cloning {repo_url} to {repo_path}")
+                self.run_command(["git", "clone", repo_url, str(repo_path)])
+            else:
+                # Single-threaded fetch to avoid collisions
+                try:
+                    self.run_command(
+                        ["git", "fetch", "--all"], cwd=repo_path, allow_fail=True
+                    )
+                except Exception:
+                    pass
         return repo_path
-
+ 
     def prepare_workspace(self, repo_name, project_key):
         """
-        Creates a temporary clone for the specific scan job.
+        Create a git worktree for this job instead of cloning the whole repo.
         """
         master_repo_path = self.repos_dir / repo_name
         workspace_path = self.temp_dir / project_key
 
-        if workspace_path.exists():
-            shutil.rmtree(workspace_path)
+        if not master_repo_path.exists():
+            raise RuntimeError(f"Master repo {repo_name} not prepared at {master_repo_path}")
 
-        # Clone from local master repo to temp workspace
-        # Using file:// protocol to clone locally
-        self.run_command(["git", "clone", str(master_repo_path), str(workspace_path)])
+        repo_lock = self._get_repo_lock(repo_name)
+        with repo_lock:
+            if workspace_path.exists():
+                # Clean stale worktree metadata if any
+                self.run_command(
+                    ["git", "worktree", "remove", str(workspace_path), "--force"],
+                    cwd=master_repo_path,
+                    allow_fail=True,
+                )
+                shutil.rmtree(workspace_path, ignore_errors=True)
+
+            # Create detached worktree at HEAD; specific commit checked out later
+            self.run_command(
+                ["git", "worktree", "add", "--detach", str(workspace_path), "HEAD"],
+                cwd=master_repo_path,
+            )
+
         return workspace_path
 
     def _commit_exists(self, repo_path, commit_sha):
@@ -201,17 +212,10 @@ class MiniScanner:
 
         workspace_path = None
         try:
-            # 1. Ensure master repo exists (thread-safe enough if we just fetch)
-            # Note: ensure_repo might have race conditions if multiple threads try to clone same repo at once.
-            # Ideally we should do this sequentially before scanning, or use a lock.
-            # For now, let's assume the user pre-clones or we handle it.
-            # We can add a lock per repo_name if needed, but let's keep it simple.
-            self.ensure_repo(repo_url, repo_name)
-
-            # 2. Prepare workspace
+            # 1. Prepare workspace (worktree) from master repo prepared per batch
             workspace_path = self.prepare_workspace(repo_name, project_key)
 
-            # 3. Checkout/Replay
+            # 2. Checkout/Replay
             repo_slug = None
             if "github.com" in repo_url:
                 parts = repo_url.split("github.com/")[-1].replace(".git", "").split("/")
@@ -237,10 +241,17 @@ class MiniScanner:
         finally:
             # Cleanup workspace
             if workspace_path and workspace_path.exists():
-                try:
-                    shutil.rmtree(workspace_path)
-                except Exception as e:
-                    logger.warning(f"Failed to cleanup workspace {workspace_path}: {e}")
+                repo_lock = self._get_repo_lock(repo_name)
+                with repo_lock:
+                    try:
+                        self.run_command(
+                            ["git", "worktree", "remove", str(workspace_path), "--force"],
+                            cwd=self.repos_dir / repo_name,
+                            allow_fail=True,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to remove worktree {workspace_path}: {e}")
+                shutil.rmtree(workspace_path, ignore_errors=True)
 
     def process_csv(self, csv_path, batch_size=Config.BATCH_SIZE):
         logger.info(f"Processing {csv_path} in batches of {batch_size}")
@@ -255,6 +266,26 @@ class MiniScanner:
                 logger.debug(f"Number of rows in batch: {len(rows)}")
                 if rows:
                     logger.debug(f"First row: {rows[0]}")
+
+                # Pre-ensure repos for this batch to avoid concurrent clones
+                repos_to_prepare = {}
+                for row in rows:
+                    gh_project_name = row.get("gh_project_name")
+                    repo_url = row.get("repo_url")
+                    if gh_project_name and not repo_url:
+                        repo_url = f"https://github.com/{gh_project_name}.git"
+                    if not repo_url:
+                        continue
+                    repo_name = repo_url.split("/")[-1].replace(".git", "")
+                    repos_to_prepare[repo_url] = repo_name
+
+                for repo_url, repo_name in repos_to_prepare.items():
+                    try:
+                        self.ensure_repo(repo_url, repo_name)
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to prepare repo {repo_name} ({repo_url}): {e}"
+                        )
 
                 with ThreadPoolExecutor(
                     max_workers=Config.CONCURRENT_SCANS
