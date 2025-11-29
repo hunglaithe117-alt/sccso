@@ -10,8 +10,4 @@ dependencies = [
     "pymongo",
     "pydantic",
     "pyyaml",
-    "fastapi",
-    "uvicorn",
-    "python-multipart",
-    "jinja2",
 ]
