@@ -243,10 +243,6 @@ async def index():
     <div class="block">
       <label for="csv-file">CSV files</label>
       <input id="csv-file" type="file" accept=".csv" multiple />
-      <div class="row">
-        <input id="scan-now" type="checkbox" />
-        <span class="muted">Start scan after upload</span>
-      </div>
       <button id="upload-btn">Upload</button>
       <div id="upload-result" class="status"></div>
     </div>
@@ -291,7 +287,7 @@ async def index():
       <div class="flex-between">
         <div>
           <label>Trạng thái từng repo</label>
-          <p class="muted" style="margin:4px 0 0;">Hiển thị số commit theo repo (done / failed / pending). Tự động làm mới mỗi 3 giây.</p>
+          <p class="muted" style="margin:4px 0 0;">Hiển thị số commit theo repo (done / failed / pending). Nhấn làm mới để cập nhật.</p>
         </div>
         <span class="refresh" id="refresh-btn">↻ Làm mới</span>
       </div>
@@ -335,7 +331,6 @@ async def index():
 
     uploadBtn.addEventListener('click', async () => {
       const fileInput = document.getElementById('csv-file');
-      const scanNow = document.getElementById('scan-now').checked;
       if (!fileInput.files.length) {
         showStatus(uploadResult, 'Please choose at least one CSV file.', true);
         return;
@@ -345,7 +340,6 @@ async def index():
       for (const file of fileInput.files) {
         form.append('files', file);
       }
-      form.append('scan_now', scanNow ? 'true' : 'false');
 
       showStatus(uploadResult, 'Uploading...');
       try {
@@ -360,20 +354,12 @@ async def index():
           showStatus(uploadResult, 'No files processed.', true);
           return;
         }
-        activeUploadJobs = [];
         const lines = [];
         data.results.forEach(item => {
           lines.push(`Saved ${item.filename} -> ${item.saved_as}`);
-          if (item.scan_started) {
-            lines.push(`Job ID: ${item.job_id} (queued)`);
-            activeUploadJobs.push(item.job_id);
-          }
         });
         showStatus(uploadResult, lines.join('\\n'));
-        if (activeUploadJobs.length) {
-          jobIdInput.value = activeUploadJobs[0];
-          pollJobs(activeUploadJobs, true);
-        }
+        loadUploads();
       } catch (err) {
         showStatus(uploadResult, `Error: ${err}`, true);
       }
@@ -550,7 +536,6 @@ async def index():
 
     refreshBtn.addEventListener('click', loadRepoSummary);
     loadRepoSummary();
-    setInterval(loadRepoSummary, 3000);
   </script>
 </body>
 </html>
@@ -561,7 +546,6 @@ async def index():
 @app.post("/api/upload")
 async def upload_csv(
     files: List[UploadFile] = File(...),
-    scan_now: bool = Form(True),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="Please upload at least one CSV file.")
@@ -604,13 +588,6 @@ async def upload_csv(
             "repos": summary.get("repos", []),
             "total_commits": summary.get("total_commits", 0),
         }
-
-        if scan_now:
-            job_id = start_scan(destination, upload_id=upload_id)
-            entry.update({"scan_started": True, "job_id": job_id})
-            uploads[upload_id]["status"] = "queued"
-            uploads[upload_id]["job_id"] = job_id
-            scanner.checkpoint.update_upload_status(upload_id, status="queued", job_id=job_id)
 
         results.append(entry)
 
