@@ -74,6 +74,7 @@ You can configure the scanner via environment variables or `.env` file (for Dock
 | :--- | :--- | :--- |
 | `SONAR_HOST_URL` | URL of the SonarQube server | `http://localhost:9000` |
 | `SONAR_TOKEN` | Authentication token for SonarQube | `admin` |
+| `SONAR_EXCLUSIONS` | Comma-separated glob patterns to skip (build/output dirs) | `.git/**,**/node_modules/**,**/build/**,**/dist/**,**/target/**,**/.gradle/**,**/.idea/**` |
 | `GITHUB_TOKENS` | Comma-separated GitHub tokens for API access | (Empty) |
 | `CONCURRENT_SCANS` | Number of parallel scans to run | `4` |
 | `BATCH_SIZE` | Number of rows to read/process at a time | `50` |

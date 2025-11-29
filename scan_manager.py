@@ -150,6 +150,8 @@ class MiniScanner:
             "-Dsonar.scm.disabled=true", # Disable SCM sensor to avoid issues with detached HEAD or shallow clones if any
             "-Dsonar.java.binaries=." # Assuming Java, but this might need adjustment for other languages
         ]
+        if Config.SONAR_EXCLUSIONS and Config.SONAR_EXCLUSIONS.strip():
+            cmd.append(f"-Dsonar.exclusions={Config.SONAR_EXCLUSIONS}")
 
         try:
             self.run_command(cmd, cwd=repo_path)

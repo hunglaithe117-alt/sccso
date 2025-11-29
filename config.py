@@ -5,6 +5,10 @@ class Config:
     SONAR_TOKEN = os.getenv("SONAR_TOKEN", "admin") # Default or change as needed
     WORK_DIR = os.getenv("WORK_DIR", "/Users/hunglai/hust/20251/thesis/scan/work_dir")
     SONAR_SCANNER_BIN = os.getenv("SONAR_SCANNER_BIN", "sonar-scanner")
+    SONAR_EXCLUSIONS = os.getenv(
+        "SONAR_EXCLUSIONS",
+        ".git/**,**/node_modules/**,**/build/**,**/dist/**,**/target/**,**/.gradle/**,**/.idea/**"
+    )
     GITHUB_TOKENS = os.getenv("GITHUB_TOKENS", "").split(",")
     
     # Batch scan configuration
@@ -12,4 +16,3 @@ class Config:
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))
     CHECKPOINT_FILE = os.getenv("CHECKPOINT_FILE", "scan_checkpoint.json")
     INPUT_CSV = os.getenv("INPUT_CSV", "commits_to_scan.csv")
-
