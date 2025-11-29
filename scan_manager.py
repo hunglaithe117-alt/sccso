@@ -243,8 +243,19 @@ class MiniScanner:
             logger.warning(f"Skipping row - missing repo_url or commit_sha: {row}")
             return False
 
+        repo_slug = repo_url.split("github.com/")[-1].replace(".git", "") if "github.com" in repo_url else None
+        owner = None
         repo_name = repo_url.split("/")[-1].replace(".git", "")
-        project_key = row.get("project_key", f"{repo_name}_{commit_sha}")
+        if repo_slug and "/" in repo_slug:
+            owner, repo_name = repo_slug.split("/", 1)
+
+        # Default project_key now includes owner to avoid collisions across orgs
+        project_key = row.get("project_key")
+        if not project_key:
+            if owner:
+                project_key = f"{owner}_{repo_name}_{commit_sha}"
+            else:
+                project_key = f"{repo_name}_{commit_sha}"
 
         # Claim the commit to avoid duplicate processing across workers
         if not self.checkpoint.try_claim_commit(

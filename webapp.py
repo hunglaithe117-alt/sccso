@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from threading import Lock, Thread
-from typing import Dict
+from typing import Dict, List
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -169,8 +169,8 @@ async def index():
     <p>Tải CSV, chọn scan và xem trạng thái ngay trong trình duyệt.</p>
 
     <div class="block">
-      <label for="csv-file">CSV file</label>
-      <input id="csv-file" type="file" accept=".csv" />
+      <label for="csv-file">CSV files</label>
+      <input id="csv-file" type="file" accept=".csv" multiple />
       <div class="row">
         <input id="scan-now" type="checkbox" checked />
         <span class="muted">Start scan after upload</span>
@@ -224,6 +224,7 @@ async def index():
     const repoSummaryEl = document.getElementById('repo-summary');
     const repoTableBody = document.querySelector('#repo-table tbody');
     const refreshBtn = document.getElementById('refresh-btn');
+    let activeUploadJobs = [];
 
     function showStatus(el, msg, error=false) {
       el.textContent = msg;
@@ -234,12 +235,14 @@ async def index():
       const fileInput = document.getElementById('csv-file');
       const scanNow = document.getElementById('scan-now').checked;
       if (!fileInput.files.length) {
-        showStatus(uploadResult, 'Please choose a CSV file.', true);
+        showStatus(uploadResult, 'Please choose at least one CSV file.', true);
         return;
       }
 
       const form = new FormData();
-      form.append('file', fileInput.files[0]);
+      for (const file of fileInput.files) {
+        form.append('files', file);
+      }
       form.append('scan_now', scanNow ? 'true' : 'false');
 
       showStatus(uploadResult, 'Uploading...');
@@ -251,13 +254,24 @@ async def index():
           return;
         }
         const data = await res.json();
-        let msg = `Saved to: ${data.saved_as}`;
-        if (data.scan_started) {
-          msg += `\\nJob ID: ${data.job_id}\\nStatus: queued`;
-          jobIdInput.value = data.job_id;
-          pollJob(data.job_id);
+        if (!data.results || !data.results.length) {
+          showStatus(uploadResult, 'No files processed.', true);
+          return;
         }
-        showStatus(uploadResult, msg);
+        activeUploadJobs = [];
+        const lines = [];
+        data.results.forEach(item => {
+          lines.push(`Saved ${item.filename} -> ${item.saved_as}`);
+          if (item.scan_started) {
+            lines.push(`Job ID: ${item.job_id} (queued)`);
+            activeUploadJobs.push(item.job_id);
+          }
+        });
+        showStatus(uploadResult, lines.join('\\n'));
+        if (activeUploadJobs.length) {
+          jobIdInput.value = activeUploadJobs[0];
+          pollJobs(activeUploadJobs, true);
+        }
       } catch (err) {
         showStatus(uploadResult, `Error: ${err}`, true);
       }
@@ -285,6 +299,28 @@ async def index():
         showStatus(jobStatus, JSON.stringify(data, null, 2));
         if (auto && (data.status === 'queued' || data.status === 'running')) {
           setTimeout(() => pollJob(jobId, true), 2000);
+        }
+      } catch (err) {
+        showStatus(jobStatus, `Error: ${err}`, true);
+      }
+    }
+
+    async function pollJobs(jobIds, auto=true) {
+      if (!jobIds.length) return;
+      try {
+        const statuses = await Promise.all(jobIds.map(async (id) => {
+          const res = await fetch(`/api/jobs/${id}`);
+          if (!res.ok) return { id, error: await res.text() };
+          return { id, ...(await res.json()) };
+        }));
+        const lines = statuses.map(s => {
+          if (s.error) return `Job ${s.id}: ${s.error}`;
+          return `Job ${s.id}: ${s.status}${s.error ? ' - ' + s.error : ''}`;
+        });
+        showStatus(jobStatus, lines.join('\\n'));
+        const hasActive = statuses.some(s => s.status === 'queued' || s.status === 'running');
+        if (auto && hasActive) {
+          setTimeout(() => pollJobs(jobIds, true), 2000);
         }
       } catch (err) {
         showStatus(jobStatus, `Error: ${err}`, true);
@@ -344,31 +380,40 @@ async def index():
 
 @app.post("/api/upload")
 async def upload_csv(
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(...),
     scan_now: bool = Form(True),
 ):
-    filename = _sanitize_filename(file.filename)
-    if not filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Please upload a CSV file.")
+    if not files:
+        raise HTTPException(status_code=400, detail="Please upload at least one CSV file.")
 
-    destination = UPLOAD_DIR / f"{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{filename}"
-    with destination.open("wb") as buffer:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            buffer.write(chunk)
+    results = []
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    for idx, file in enumerate(files, start=1):
+        filename = _sanitize_filename(file.filename)
+        if not filename.lower().endswith(".csv"):
+            raise HTTPException(status_code=400, detail=f"File {filename} is not CSV.")
 
-    response = {
-        "saved_as": str(destination),
-        "scan_started": False,
-    }
+        destination = UPLOAD_DIR / f"{timestamp}-{idx}-{filename}"
+        with destination.open("wb") as buffer:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                buffer.write(chunk)
 
-    if scan_now:
-        job_id = start_scan(destination)
-        response.update({"scan_started": True, "job_id": job_id})
+        entry = {
+            "filename": filename,
+            "saved_as": str(destination),
+            "scan_started": False,
+        }
 
-    return JSONResponse(response)
+        if scan_now:
+            job_id = start_scan(destination)
+            entry.update({"scan_started": True, "job_id": job_id})
+
+        results.append(entry)
+
+    return JSONResponse({"results": results})
 
 
 @app.get("/api/jobs")
