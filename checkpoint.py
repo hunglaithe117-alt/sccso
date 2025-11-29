@@ -1,3 +1,4 @@
+import json
 import logging
 import sqlite3
 import time
@@ -37,10 +38,29 @@ class CheckpointManager:
                 )
                 self._ensure_columns(conn)
                 conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS uploads (
+                        id TEXT PRIMARY KEY,
+                        filename TEXT,
+                        saved_as TEXT,
+                        status TEXT,
+                        total_commits INTEGER,
+                        repos_json TEXT,
+                        job_id TEXT,
+                        error_msg TEXT,
+                        uploaded_at TEXT
+                    )
+                    """
+                )
+                self._ensure_upload_columns(conn)
+                conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_scans_repo ON scans(repo_name)"
                 )
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_scans_status ON scans(status)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_uploads_status ON uploads(status)"
                 )
         except Exception as e:
             logger.error(f"Failed to init DB: {e}")
@@ -63,6 +83,35 @@ class CheckpointManager:
                     conn.execute(ddl)
         except Exception as e:
             logger.error(f"Failed to ensure schema: {e}")
+        try:
+            existing = {
+                row[1] for row in conn.execute("PRAGMA table_info(uploads)").fetchall()
+            }
+            uploads_extras = {
+                "error_msg": "ALTER TABLE uploads ADD COLUMN error_msg TEXT",
+            }
+            for col, ddl in uploads_extras.items():
+                if col not in existing:
+                    conn.execute(ddl)
+        except Exception as e:
+            logger.error(f"Failed to ensure uploads schema: {e}")
+
+    def _ensure_upload_columns(self, conn):
+        try:
+            existing = {
+                row[1] for row in conn.execute("PRAGMA table_info(uploads)").fetchall()
+            }
+            extras = {
+                "total_commits": "ALTER TABLE uploads ADD COLUMN total_commits INTEGER",
+                "repos_json": "ALTER TABLE uploads ADD COLUMN repos_json TEXT",
+                "job_id": "ALTER TABLE uploads ADD COLUMN job_id TEXT",
+                "uploaded_at": "ALTER TABLE uploads ADD COLUMN uploaded_at TEXT",
+            }
+            for col, ddl in extras.items():
+                if col not in existing:
+                    conn.execute(ddl)
+        except Exception as e:
+            logger.error(f"Failed to ensure upload columns: {e}")
 
     def reset_pending_jobs(self):
         """Clear leftover pending jobs from previous runs so they can be claimed again."""
@@ -72,6 +121,22 @@ class CheckpointManager:
             logger.info("Reset pending jobs from previous run.")
         except Exception as e:
             logger.error(f"Failed to reset pending jobs: {e}")
+
+    def reset_upload_states(self):
+        """
+        Reset uploads stuck in queued/running back to 'uploaded' so they can be triggered again after restart.
+        """
+        try:
+            with self._get_conn() as conn:
+                conn.execute(
+                    """
+                    UPDATE uploads
+                    SET status = 'uploaded', job_id = NULL, error_msg = NULL
+                    WHERE status IN ('queued', 'running')
+                    """
+                )
+        except Exception as e:
+            logger.error(f"Failed to reset upload states: {e}")
 
     def try_claim_commit(
         self,
@@ -205,3 +270,86 @@ class CheckpointManager:
         except Exception as e:
             logger.error(f"Failed to fetch repo summary: {e}")
             return []
+
+    # Upload persistence helpers
+    def upsert_upload(self, upload: Dict):
+        try:
+            with self._get_conn() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO uploads
+                    (id, filename, saved_as, status, total_commits, repos_json, job_id, error_msg, uploaded_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        upload.get("id"),
+                        upload.get("filename"),
+                        upload.get("saved_as"),
+                        upload.get("status"),
+                        upload.get("total_commits"),
+                        json.dumps(upload.get("repos", [])),
+                        upload.get("job_id"),
+                        upload.get("error"),
+                        upload.get("uploaded_at"),
+                    ),
+                )
+        except Exception as e:
+            logger.error(f"Failed to upsert upload {upload.get('id')}: {e}")
+
+    def get_uploads(self) -> List[Dict]:
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, filename, saved_as, status, total_commits, repos_json, job_id, error_msg, uploaded_at
+                    FROM uploads
+                    ORDER BY uploaded_at DESC
+                    """
+                ).fetchall()
+            result = []
+            for row in rows:
+                result.append(
+                    {
+                        "id": row[0],
+                        "filename": row[1],
+                        "saved_as": row[2],
+                        "status": row[3],
+                        "total_commits": row[4] or 0,
+                        "repos": json.loads(row[5] or "[]"),
+                        "job_id": row[6],
+                        "error": row[7],
+                        "uploaded_at": row[8],
+                    }
+                )
+            return result
+        except Exception as e:
+            logger.error(f"Failed to get uploads: {e}")
+            return []
+
+    def update_upload_status(
+        self,
+        upload_id: str,
+        status: Optional[str] = None,
+        job_id: Optional[str] = None,
+        error: Optional[str] = None,
+    ):
+        try:
+            with self._get_conn() as conn:
+                current = conn.execute(
+                    "SELECT filename, saved_as, total_commits, repos_json, uploaded_at FROM uploads WHERE id = ?",
+                    (upload_id,),
+                ).fetchone()
+                if not current:
+                    return
+                conn.execute(
+                    """
+                    UPDATE uploads
+                    SET status = COALESCE(?, status),
+                        job_id = COALESCE(?, job_id),
+                        error_msg = COALESCE(?, error_msg)
+                    WHERE id = ?
+                    """,
+                    (status, job_id, error, upload_id),
+                )
+        except Exception as e:
+            logger.error(f"Failed to update upload {upload_id}: {e}")

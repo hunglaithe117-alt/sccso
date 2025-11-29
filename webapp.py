@@ -5,6 +5,7 @@ from threading import Lock, Thread
 from typing import Dict, List
 from uuid import uuid4
 
+import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize scanner and storage
 scanner = MiniScanner()
+scanner.checkpoint.reset_upload_states()
 UPLOAD_DIR = Path(Config.WORK_DIR) / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -22,14 +24,24 @@ app = FastAPI(title="Mini Scanner UI", version="1.0.0")
 
 # Simple in-memory job store
 jobs: Dict[str, Dict] = {}
+uploads: Dict[str, Dict] = {}
 scan_lock = Lock()
+
+
+def _load_uploads_from_db():
+    uploads.clear()
+    for row in scanner.checkpoint.get_uploads():
+        uploads[row["id"]] = row
+
+
+_load_uploads_from_db()
 
 
 def _sanitize_filename(filename: str) -> str:
     return Path(filename).name or "upload.csv"
 
 
-def _run_scan(job_id: str, csv_path: Path):
+def _run_scan(job_id: str, csv_path: Path, upload_id: str = None):
     """
     Run the scan in a background thread to keep the API responsive.
     """
@@ -41,22 +53,66 @@ def _run_scan(job_id: str, csv_path: Path):
             scanner.process_csv(csv_path)
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["completed_at"] = datetime.utcnow().isoformat() + "Z"
+        if upload_id and upload_id in uploads:
+            uploads[upload_id]["status"] = "completed"
+            uploads[upload_id]["job_id"] = job_id
+            scanner.checkpoint.update_upload_status(upload_id, status="completed", job_id=job_id, error=None)
     except Exception as exc:
         logger.exception("Scan failed", exc_info=exc)
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(exc)
         jobs[job_id]["completed_at"] = datetime.utcnow().isoformat() + "Z"
+        if upload_id and upload_id in uploads:
+            uploads[upload_id]["status"] = "error"
+            uploads[upload_id]["error"] = str(exc)
+            uploads[upload_id]["job_id"] = job_id
+            scanner.checkpoint.update_upload_status(upload_id, status="error", job_id=job_id, error=str(exc))
 
 
-def start_scan(csv_path: Path) -> str:
+def start_scan(csv_path: Path, upload_id: str = None) -> str:
     job_id = str(uuid4())
     jobs[job_id] = {
         "status": "queued",
         "csv_path": str(csv_path),
         "created_at": datetime.utcnow().isoformat() + "Z",
+        "upload_id": upload_id,
     }
-    Thread(target=_run_scan, args=(job_id, csv_path), daemon=True).start()
+    Thread(target=_run_scan, args=(job_id, csv_path, upload_id), daemon=True).start()
     return job_id
+
+
+def summarize_csv(csv_path: Path) -> Dict:
+    """
+    Return per-repo commit counts for a CSV.
+    """
+    summary = {}
+    total = 0
+    try:
+        for chunk in pd.read_csv(csv_path, chunksize=Config.BATCH_SIZE):
+            for row in chunk.to_dict("records"):
+                repo_url = row.get("repo_url")
+                gh_project_name = row.get("gh_project_name")
+                if gh_project_name and not repo_url:
+                    repo_url = f"https://github.com/{gh_project_name}.git"
+                if not repo_url:
+                    continue
+
+                slug = repo_url.split("github.com/")[-1].replace(".git", "") if "github.com" in repo_url else None
+                owner = None
+                repo_name = repo_url.split("/")[-1].replace(".git", "")
+                if slug and "/" in slug:
+                    owner, repo_name = slug.split("/", 1)
+                key = f"{owner}_{repo_name}" if owner else repo_name
+                summary[key] = summary.get(key, 0) + 1
+                total += 1
+    except Exception as exc:
+        logger.warning(f"Failed to summarize CSV {csv_path}: {exc}")
+
+    rows = [
+        {"repo": repo, "commits": commits}
+        for repo, commits in sorted(summary.items(), key=lambda kv: kv[0])
+    ]
+    return {"total_commits": total, "repos": rows}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -172,7 +228,7 @@ async def index():
       <label for="csv-file">CSV files</label>
       <input id="csv-file" type="file" accept=".csv" multiple />
       <div class="row">
-        <input id="scan-now" type="checkbox" checked />
+        <input id="scan-now" type="checkbox" />
         <span class="muted">Start scan after upload</span>
       </div>
       <button id="upload-btn">Upload</button>
@@ -186,6 +242,33 @@ async def index():
         <button id="check-btn">Check</button>
       </div>
       <div id="job-status" class="status"></div>
+    </div>
+
+    <div class="block">
+      <div class="flex-between">
+        <div>
+          <label>Uploads</label>
+          <p class="muted" style="margin:4px 0 0;">Danh sách repo/commit trong các CSV đã tải. Nhấn Scan để chạy từng file, hoặc Scan tất cả.</p>
+        </div>
+        <div class="row" style="gap:8px;">
+          <button id="scan-all-btn">Scan tất cả chưa chạy</button>
+          <span class="refresh" id="refresh-uploads">↻ Làm mới</span>
+        </div>
+      </div>
+      <div style="overflow-x:auto;">
+        <table id="uploads-table">
+          <thead>
+            <tr>
+              <th>Upload</th>
+              <th>Repos</th>
+              <th>Tổng commits</th>
+              <th>Trạng thái</th>
+              <th>Hành động</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </div>
 
     <div class="block">
@@ -224,6 +307,9 @@ async def index():
     const repoSummaryEl = document.getElementById('repo-summary');
     const repoTableBody = document.querySelector('#repo-table tbody');
     const refreshBtn = document.getElementById('refresh-btn');
+    const uploadsTableBody = document.querySelector('#uploads-table tbody');
+    const scanAllBtn = document.getElementById('scan-all-btn');
+    const refreshUploadsBtn = document.getElementById('refresh-uploads');
     let activeUploadJobs = [];
 
     function showStatus(el, msg, error=false) {
@@ -327,6 +413,84 @@ async def index():
       }
     }
 
+    async function loadUploads() {
+      try {
+        const res = await fetch('/api/uploads');
+        if (!res.ok) {
+          uploadsTableBody.innerHTML = '<tr><td colspan="5" style="color:#f87171;">Lỗi tải danh sách uploads</td></tr>';
+          return;
+        }
+        const data = await res.json();
+        uploadsTableBody.innerHTML = '';
+        if (!data.length) {
+          uploadsTableBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);">Chưa có upload nào</td></tr>';
+          return;
+        }
+        data.forEach(u => {
+          const reposText = (u.repos || []).map(r => `${r.repo} (${r.commits})`).join(', ');
+          const tr = document.createElement('tr');
+          const disabled = u.status === 'queued' || u.status === 'running';
+          tr.innerHTML = `
+            <td>${u.filename}</td>
+            <td>${reposText || '(unknown)'}</td>
+            <td>${u.total_commits || 0}</td>
+            <td>${u.status || 'uploaded'}</td>
+            <td>
+              <button data-upload="${u.id}" ${disabled ? 'disabled' : ''}>Scan</button>
+            </td>
+          `;
+          tr.querySelector('button').addEventListener('click', () => triggerScan(u.id));
+          uploadsTableBody.appendChild(tr);
+        });
+      } catch (err) {
+        uploadsTableBody.innerHTML = `<tr><td colspan="5" style="color:#f87171;">${err}</td></tr>`;
+      }
+    }
+
+    async function triggerScan(uploadId) {
+      showStatus(jobStatus, 'Starting scan...');
+      try {
+        const res = await fetch(`/api/uploads/${uploadId}/scan`, { method: 'POST' });
+        if (!res.ok) {
+          const txt = await res.text();
+          showStatus(jobStatus, `Không thể scan: ${txt}`, true);
+          return;
+        }
+        const data = await res.json();
+        showStatus(jobStatus, `Job ${data.job_id} queued`);
+        loadUploads();
+        pollJob(data.job_id, true);
+      } catch (err) {
+        showStatus(jobStatus, `Error: ${err}`, true);
+      }
+    }
+
+    async function triggerScanAll() {
+      showStatus(jobStatus, 'Starting all pending scans...');
+      try {
+        const res = await fetch('/api/uploads/scan_all_pending', { method: 'POST' });
+        if (!res.ok) {
+          const txt = await res.text();
+          showStatus(jobStatus, `Không thể scan tất cả: ${txt}`, true);
+          return;
+        }
+        const data = await res.json();
+        if (!data.job_ids || !data.job_ids.length) {
+          showStatus(jobStatus, 'Không có upload pending để scan.');
+          return;
+        }
+        showStatus(jobStatus, `Queued jobs: ${data.job_ids.join(', ')}`);
+        loadUploads();
+        pollJobs(data.job_ids, true);
+      } catch (err) {
+        showStatus(jobStatus, `Error: ${err}`, true);
+      }
+    }
+
+    scanAllBtn.addEventListener('click', triggerScanAll);
+    refreshUploadsBtn.addEventListener('click', loadUploads);
+    loadUploads();
+
     async function loadRepoSummary() {
       repoSummaryEl.textContent = 'Đang tải...';
       try {
@@ -401,15 +565,36 @@ async def upload_csv(
                     break
                 buffer.write(chunk)
 
+        summary = summarize_csv(destination)
+        upload_id = str(uuid4())
+        uploads[upload_id] = {
+            "id": upload_id,
+            "filename": filename,
+            "saved_as": str(destination),
+            "status": "uploaded",
+            "repos": summary.get("repos", []),
+            "total_commits": summary.get("total_commits", 0),
+            "uploaded_at": datetime.utcnow().isoformat() + "Z",
+            "job_id": None,
+            "error": None,
+        }
+        scanner.checkpoint.upsert_upload(uploads[upload_id])
+
         entry = {
             "filename": filename,
             "saved_as": str(destination),
             "scan_started": False,
+            "upload_id": upload_id,
+            "repos": summary.get("repos", []),
+            "total_commits": summary.get("total_commits", 0),
         }
 
         if scan_now:
-            job_id = start_scan(destination)
+            job_id = start_scan(destination, upload_id=upload_id)
             entry.update({"scan_started": True, "job_id": job_id})
+            uploads[upload_id]["status"] = "queued"
+            uploads[upload_id]["job_id"] = job_id
+            scanner.checkpoint.update_upload_status(upload_id, status="queued", job_id=job_id)
 
         results.append(entry)
 
@@ -435,3 +620,48 @@ async def repo_summary():
     Return aggregate commit counts per repo using the checkpoint DB.
     """
     return JSONResponse(scanner.checkpoint.get_repo_summary())
+
+
+@app.get("/api/uploads")
+async def list_uploads():
+    _load_uploads_from_db()
+    data = sorted(
+        uploads.values(),
+        key=lambda u: u.get("uploaded_at", ""),
+        reverse=True,
+    )
+    return JSONResponse(data)
+
+
+def _can_start_upload(upload: Dict) -> bool:
+    return upload.get("status") not in {"queued", "running", "completed"}
+
+
+@app.post("/api/uploads/{upload_id}/scan")
+async def scan_upload(upload_id: str):
+    _load_uploads_from_db()
+    upload = uploads.get(upload_id)
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    if not _can_start_upload(upload):
+        return JSONResponse({"message": "Upload already queued/running/completed", "job_id": upload.get("job_id")})
+
+    job_id = start_scan(Path(upload["saved_as"]), upload_id=upload_id)
+    upload["status"] = "queued"
+    upload["job_id"] = job_id
+    scanner.checkpoint.update_upload_status(upload_id, status="queued", job_id=job_id)
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/uploads/scan_all_pending")
+async def scan_all_pending():
+    _load_uploads_from_db()
+    job_ids = []
+    for upload in uploads.values():
+        if _can_start_upload(upload):
+            job_id = start_scan(Path(upload["saved_as"]), upload_id=upload["id"])
+            upload["status"] = "queued"
+            upload["job_id"] = job_id
+            scanner.checkpoint.update_upload_status(upload["id"], status="queued", job_id=job_id)
+            job_ids.append(job_id)
+    return JSONResponse({"job_ids": job_ids})
