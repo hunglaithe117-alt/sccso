@@ -3,17 +3,23 @@ import shutil
 import logging
 import pandas as pd
 import os
-import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import Config
 from checkpoint import CheckpointManager
 from pipeline.github_api import GitHubAPI
-from pipeline.commit_replay import build_replay_plan, apply_replay_plan, MissingForkCommitError
+from pipeline.commit_replay import (
+    build_replay_plan,
+    apply_replay_plan,
+    MissingForkCommitError,
+)
 
 # Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
+
 
 class MiniScanner:
     def __init__(self):
@@ -23,20 +29,9 @@ class MiniScanner:
         self.repos_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir = self.work_dir / "temp"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
-        
+
         self.checkpoint = CheckpointManager(Config.CHECKPOINT_FILE)
-        tokens = [t for t in Config.GITHUB_TOKENS if t.strip()]
-        self.github = GitHubAPI(tokens) if tokens else None
-
-        # Lock per repo to avoid concurrent clone/fetch into the same path
-        self._repo_locks: dict[str, threading.Lock] = {}
-        self._repo_locks_lock = threading.Lock()
-
-    def _get_repo_lock(self, repo_name: str) -> threading.Lock:
-        with self._repo_locks_lock:
-            if repo_name not in self._repo_locks:
-                self._repo_locks[repo_name] = threading.Lock()
-            return self._repo_locks[repo_name]
+        self.github = GitHubAPI(Config.GITHUB_TOKENS) if Config.GITHUB_TOKENS else None
 
     def run_command(self, cmd, cwd=None, allow_fail=False):
         # logger.debug(f"Running command: {' '.join(cmd)}")
@@ -46,7 +41,7 @@ class MiniScanner:
                 cwd=str(cwd) if cwd else None,
                 capture_output=True,
                 text=True,
-                check=not allow_fail
+                check=not allow_fail,
             )
             return result.stdout
         except subprocess.CalledProcessError as e:
@@ -62,17 +57,22 @@ class MiniScanner:
         Ensures the 'master' copy of the repo exists in repos_dir.
         """
         repo_path = self.repos_dir / repo_name
-        repo_lock = self._get_repo_lock(repo_name)
-        with repo_lock:
-            if not repo_path.exists():
-                logger.info(f"Cloning {repo_url} to {repo_path}")
-                self.run_command(["git", "clone", repo_url, str(repo_path)])
-            else:
-                # Single-threaded fetch to avoid collision when many jobs target same repo
-                try:
-                    self.run_command(["git", "fetch", "--all"], cwd=repo_path, allow_fail=True)
-                except Exception:
-                    pass
+        if not repo_path.exists():
+            logger.info(f"Cloning {repo_url} to {repo_path}")
+            self.run_command(["git", "clone", repo_url, str(repo_path)])
+        else:
+            # logger.info(f"Repo {repo_name} exists. Fetching updates...")
+            # We can skip fetch if we assume we have what we need, or fetch periodically.
+            # For concurrency, multiple threads might try to fetch same repo.
+            # Ideally we should lock this, but git handles concurrent fetches somewhat okay,
+            # or we can just ignore errors if it's busy.
+            # For now, let's assume we fetch once or just try.
+            try:
+                self.run_command(
+                    ["git", "fetch", "--all"], cwd=repo_path, allow_fail=True
+                )
+            except Exception:
+                pass
         return repo_path
 
     def prepare_workspace(self, repo_name, project_key):
@@ -81,10 +81,10 @@ class MiniScanner:
         """
         master_repo_path = self.repos_dir / repo_name
         workspace_path = self.temp_dir / project_key
-        
+
         if workspace_path.exists():
             shutil.rmtree(workspace_path)
-            
+
         # Clone from local master repo to temp workspace
         # Using file:// protocol to clone locally
         self.run_command(["git", "clone", str(master_repo_path), str(workspace_path)])
@@ -92,14 +92,16 @@ class MiniScanner:
 
     def _commit_exists(self, repo_path, commit_sha):
         try:
-            self.run_command(["git", "cat-file", "-e", f"{commit_sha}^{{commit}}"], cwd=repo_path)
+            self.run_command(
+                ["git", "cat-file", "-e", f"{commit_sha}^{{commit}}"], cwd=repo_path
+            )
             return True
         except Exception:
             return False
 
     def checkout_commit(self, repo_path, commit_sha, repo_slug=None):
         logger.info(f"Checking out commit {commit_sha} in {repo_path}")
-        
+
         # 1. Try standard checkout
         if self._commit_exists(repo_path, commit_sha):
             try:
@@ -111,19 +113,23 @@ class MiniScanner:
 
         # 2. If missing and we have GitHub tokens, try replay
         if self.github and repo_slug:
-            logger.info(f"Commit {commit_sha} missing locally. Attempting replay from GitHub...")
+            logger.info(
+                f"Commit {commit_sha} missing locally. Attempting replay from GitHub..."
+            )
             try:
                 plan = build_replay_plan(
                     github=self.github,
                     repo_slug=repo_slug,
                     target_sha=commit_sha,
-                    commit_exists=lambda sha: self._commit_exists(repo_path, sha)
+                    commit_exists=lambda sha: self._commit_exists(repo_path, sha),
                 )
-                
+
                 # Checkout base
-                self.run_command(["git", "checkout", "-f", plan.base_sha], cwd=repo_path)
+                self.run_command(
+                    ["git", "checkout", "-f", plan.base_sha], cwd=repo_path
+                )
                 self.run_command(["git", "clean", "-fdx"], cwd=repo_path)
-                
+
                 # Apply patches
                 apply_replay_plan(repo_path, plan)
                 logger.info(f"Successfully replayed commit {commit_sha}")
@@ -134,7 +140,7 @@ class MiniScanner:
             except Exception as e:
                 logger.error(f"Unexpected error during replay: {e}")
                 raise e
-        
+
         raise RuntimeError(f"Commit {commit_sha} not found and cannot be replayed.")
 
     def check_dependencies(self):
@@ -143,11 +149,13 @@ class MiniScanner:
             raise RuntimeError("git is not installed or not in PATH.")
         # Check for sonar-scanner
         if shutil.which(Config.SONAR_SCANNER_BIN) is None:
-             logger.warning(f"'{Config.SONAR_SCANNER_BIN}' not found in PATH. Ensure it is installed and configured.")
+            logger.warning(
+                f"'{Config.SONAR_SCANNER_BIN}' not found in PATH. Ensure it is installed and configured."
+            )
 
     def run_sonar_scan(self, repo_path, project_key, commit_sha):
         logger.info(f"Starting SonarQube scan for {project_key} at {commit_sha}")
-        
+
         cmd = [
             Config.SONAR_SCANNER_BIN,
             f"-Dsonar.projectKey={project_key}",
@@ -156,8 +164,8 @@ class MiniScanner:
             "-Dsonar.sources=.",
             f"-Dsonar.host.url={Config.SONAR_HOST_URL}",
             f"-Dsonar.token={Config.SONAR_TOKEN}",
-            "-Dsonar.scm.disabled=true", # Disable SCM sensor to avoid issues with detached HEAD or shallow clones if any
-            "-Dsonar.java.binaries=." # Assuming Java, but this might need adjustment for other languages
+            "-Dsonar.scm.disabled=true",  # Disable SCM sensor to avoid issues with detached HEAD or shallow clones if any
+            "-Dsonar.java.binaries=.",  # Assuming Java, but this might need adjustment for other languages
         ]
         if Config.SONAR_EXCLUSIONS and Config.SONAR_EXCLUSIONS.strip():
             cmd.append(f"-Dsonar.exclusions={Config.SONAR_EXCLUSIONS}")
@@ -171,14 +179,21 @@ class MiniScanner:
             return False
 
     def process_single_job(self, row):
-        repo_url = row.get('repo_url')
-        commit_sha = row.get('commit_sha')
-        
+        # Support both column formats
+        gh_project_name = row.get("gh_project_name")
+        commit_sha = row.get("git_trigger_commit") or row.get("commit_sha")
+        repo_url = row.get("repo_url")
+
+        # If we have gh_project_name, construct repo_url
+        if gh_project_name and not repo_url:
+            repo_url = f"https://github.com/{gh_project_name}.git"
+
         if not repo_url or not commit_sha:
+            logger.warning(f"Skipping row - missing repo_url or commit_sha: {row}")
             return False
 
-        repo_name = repo_url.split('/')[-1].replace('.git', '')
-        project_key = row.get('project_key', f"{repo_name}_{commit_sha}")
+        repo_name = repo_url.split("/")[-1].replace(".git", "")
+        project_key = row.get("project_key", f"{repo_name}_{commit_sha}")
 
         if self.checkpoint.is_processed(commit_sha):
             logger.info(f"Skipping {project_key} (already processed)")
@@ -207,7 +222,7 @@ class MiniScanner:
 
             # 4. Run Scan
             success = self.run_sonar_scan(workspace_path, project_key, commit_sha)
-            
+
             if success:
                 self.checkpoint.mark_processed(commit_sha)
                 return True
@@ -229,29 +244,46 @@ class MiniScanner:
 
     def process_csv(self, csv_path, batch_size=Config.BATCH_SIZE):
         logger.info(f"Processing {csv_path} in batches of {batch_size}")
-        
+
         try:
-            for batch_idx, df_chunk in enumerate(pd.read_csv(csv_path, chunksize=batch_size)):
+            for batch_idx, df_chunk in enumerate(
+                pd.read_csv(csv_path, chunksize=batch_size)
+            ):
                 logger.info(f"--- Starting Batch {batch_idx + 1} ---")
-                rows = df_chunk.to_dict('records')
-                
-                with ThreadPoolExecutor(max_workers=Config.CONCURRENT_SCANS) as executor:
-                    futures = {executor.submit(self.process_single_job, row): row for row in rows}
-                    
+                logger.debug(f"Batch columns: {df_chunk.columns.tolist()}")
+                rows = df_chunk.to_dict("records")
+                logger.debug(f"Number of rows in batch: {len(rows)}")
+                if rows:
+                    logger.debug(f"First row: {rows[0]}")
+
+                with ThreadPoolExecutor(
+                    max_workers=Config.CONCURRENT_SCANS
+                ) as executor:
+                    futures = {
+                        executor.submit(self.process_single_job, row): row
+                        for row in rows
+                    }
+
                     for future in as_completed(futures):
                         try:
                             future.result()
                         except Exception as e:
                             logger.error(f"Job failed with exception: {e}")
-                
+
                 logger.info(f"--- Completed Batch {batch_idx + 1} ---")
         except Exception as e:
             logger.error(f"Failed to process CSV {csv_path}: {e}")
 
+
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Mini SonarQube Scanner Pipeline (Batch)")
-    parser.add_argument("csv_file", help="Path to the CSV file containing repo and commit info")
+
+    parser = argparse.ArgumentParser(
+        description="Mini SonarQube Scanner Pipeline (Batch)"
+    )
+    parser.add_argument(
+        "csv_file", help="Path to the CSV file containing repo and commit info"
+    )
     args = parser.parse_args()
 
     scanner = MiniScanner()

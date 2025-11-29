@@ -36,6 +36,7 @@ services:
       - GITHUB_TOKENS=  # Add your tokens here, comma separated
       - CONCURRENT_SCANS=4
       - BATCH_SIZE=50
+      - WORK_DIR=/app/work_dir
     depends_on:
       - sonarqube
     volumes:
