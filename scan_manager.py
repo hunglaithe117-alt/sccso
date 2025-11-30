@@ -2,6 +2,8 @@ import subprocess
 import shutil
 import logging
 import pandas as pd
+import requests
+import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from filelock import FileLock
@@ -224,10 +226,61 @@ class MiniScanner:
         try:
             self.run_command(cmd, cwd=repo_path)
             logger.info(f"Scan completed successfully for {project_key}")
+            if Config.WAIT_FOR_CE:
+                self.wait_for_compute_engine(project_key)
             return True
         except Exception as e:
             logger.error(f"Scan failed for {project_key}: {e}")
             return False
+
+    def wait_for_compute_engine(self, project_key: str):
+        """
+        Poll SonarQube Compute Engine until tasks for this project finish, to avoid fetching empty measures.
+        """
+        if not Config.SONAR_HOST_URL or not Config.SONAR_TOKEN:
+            logger.warning("Cannot wait for Compute Engine (missing SONAR_HOST_URL or SONAR_TOKEN).")
+            return
+
+        deadline = time.time() + Config.WAIT_FOR_CE_TIMEOUT
+        url = f"{Config.SONAR_HOST_URL.rstrip('/')}/api/ce/component"
+        auth = (Config.SONAR_TOKEN, "")
+
+        while time.time() < deadline:
+            try:
+                resp = requests.get(url, params={"component": project_key}, auth=auth, timeout=30)
+                if resp.status_code == 401:
+                    logger.warning("Unauthorized to query CE status; skipping wait.")
+                    return
+                resp.raise_for_status()
+                data = resp.json()
+                current = data.get("current")
+                queue = data.get("queue", [])
+
+                # If no current task and queue empty, we're done
+                if not current and not queue:
+                    logger.info(f"CE done for {project_key}")
+                    return
+
+                # If current exists, check status
+                if current:
+                    status = current.get("status")
+                    task_id = current.get("id")
+                    if status in {"SUCCESS", "FAILED", "CANCELED"}:
+                        logger.info(f"CE task {task_id} for {project_key} finished with {status}")
+                        if status == "SUCCESS":
+                            return
+                        else:
+                            return
+                logger.info(
+                    f"Waiting for CE tasks of {project_key} "
+                    f"(in queue: {len(queue)}, status: {current.get('status') if current else 'none'})"
+                )
+            except Exception as exc:
+                logger.warning(f"Error polling CE for {project_key}: {exc}")
+
+            time.sleep(Config.WAIT_FOR_CE_POLL)
+
+        logger.warning(f"Timed out waiting for CE tasks for {project_key}")
 
     def process_single_job(self, row):
         # Support both column formats

@@ -29,3 +29,8 @@ class Config:
     else:
         CHECKPOINT_FILE = str(Path(WORK_DIR) / "scan_checkpoint.db")
     INPUT_CSV = os.getenv("INPUT_CSV", "commits_to_scan.csv")
+
+    # Compute Engine wait configuration
+    WAIT_FOR_CE = os.getenv("WAIT_FOR_CE", "true").lower() in {"1", "true", "yes"}
+    WAIT_FOR_CE_TIMEOUT = int(os.getenv("WAIT_FOR_CE_TIMEOUT", "600"))  # seconds
+    WAIT_FOR_CE_POLL = int(os.getenv("WAIT_FOR_CE_POLL", "5"))  # seconds

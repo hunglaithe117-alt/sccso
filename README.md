@@ -83,7 +83,7 @@ You can configure the scanner via environment variables or `.env` file (for Dock
 | `SONAR_TOKEN` | Authentication token for SonarQube | `admin` |
 | `SONAR_EXCLUSIONS` | Comma-separated glob patterns to skip (build/output dirs) | `.git/**,**/node_modules/**,**/build/**,**/dist/**,**/target/**,**/.gradle/**,**/.idea/**` |
 | `GITHUB_TOKENS` | Comma-separated GitHub tokens for API access | (Empty) |
-| `CONCURRENT_SCANS` | Number of parallel scans to run | `4` |
+| `CONCURRENT_SCANS` | Number of parallel scans to run | `3` (Community CE has 1 worker; keep modest) |
 | `BATCH_SIZE` | Number of rows to read/process at a time | `50` |
 | `CHECKPOINT_FILE` | SQLite DB file to store progress (relative paths resolve inside `WORK_DIR`) | `work_dir/scan_checkpoint.db` |
 | `WORK_DIR` | Location for temporary repos, checkpoints, and CSV input (mounted for Docker) | `<repo>/work_dir` (overridden to `/app/work_dir` in docker-compose) |
@@ -95,6 +95,8 @@ You can configure the scanner via environment variables or `.env` file (for Dock
 - Checkpoints are stored in SQLite with WAL mode; each commit is claimed atomically (`PENDING`), preventing duplicate scans across threads/containers. Pending jobs from previous crashes are cleared at startup.
 - Temporary worktrees in `work_dir/temp/` are cleaned on startup and `git worktree prune` is run per repo to remove stale metadata from previous runs.
 - A single thread pool is reused across batches to avoid head-of-line blocking when one job is slow.
+- SonarQube Community has only 1 CE worker. Compose config boosts CE/Web/Search memory and keeps scanner concurrency modest to avoid overfilling the queue.
+- If the SonarQube UI shows "Embedded database should be used for evaluation purposes only", ensure you're using Postgres by setting `SONAR_JDBC_URL/USERNAME/PASSWORD` (already configured in `docker-compose.yml`).
 
 ## Checkpoints
 
