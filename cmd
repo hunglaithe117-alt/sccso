@@ -6,3 +6,4 @@ curl -u "admin:admin" -X POST \
   -d "type=USER_TOKEN"
 
 docker compose up -d --build
+sudo rm -r work_dir/

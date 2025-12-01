@@ -36,7 +36,6 @@ class CheckpointManager:
                     )
                     """
                 )
-                self._ensure_columns(conn)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS uploads (
@@ -52,6 +51,8 @@ class CheckpointManager:
                     )
                     """
                 )
+                # Ensure columns AFTER both tables are created
+                self._ensure_columns(conn)
                 self._ensure_upload_columns(conn)
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_scans_repo ON scans(repo_name)"
@@ -68,6 +69,7 @@ class CheckpointManager:
     def _ensure_columns(self, conn):
         """
         Add new columns if the DB was created before the schema was expanded.
+        Only handles 'scans' table columns.
         """
         try:
             existing = {
@@ -82,21 +84,12 @@ class CheckpointManager:
                 if col not in existing:
                     conn.execute(ddl)
         except Exception as e:
-            logger.error(f"Failed to ensure schema: {e}")
-        try:
-            existing = {
-                row[1] for row in conn.execute("PRAGMA table_info(uploads)").fetchall()
-            }
-            uploads_extras = {
-                "error_msg": "ALTER TABLE uploads ADD COLUMN error_msg TEXT",
-            }
-            for col, ddl in uploads_extras.items():
-                if col not in existing:
-                    conn.execute(ddl)
-        except Exception as e:
-            logger.error(f"Failed to ensure uploads schema: {e}")
+            logger.error(f"Failed to ensure scans schema: {e}")
 
     def _ensure_upload_columns(self, conn):
+        """
+        Add new columns to 'uploads' table if needed.
+        """
         try:
             existing = {
                 row[1] for row in conn.execute("PRAGMA table_info(uploads)").fetchall()
@@ -106,6 +99,7 @@ class CheckpointManager:
                 "repos_json": "ALTER TABLE uploads ADD COLUMN repos_json TEXT",
                 "job_id": "ALTER TABLE uploads ADD COLUMN job_id TEXT",
                 "uploaded_at": "ALTER TABLE uploads ADD COLUMN uploaded_at TEXT",
+                "error_msg": "ALTER TABLE uploads ADD COLUMN error_msg TEXT",
             }
             for col, ddl in extras.items():
                 if col not in existing:
