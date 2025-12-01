@@ -553,43 +553,56 @@ async def upload_csv(
     results = []
     timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     for idx, file in enumerate(files, start=1):
-        filename = _sanitize_filename(file.filename)
-        if not filename.lower().endswith(".csv"):
-            raise HTTPException(status_code=400, detail=f"File {filename} is not CSV.")
+        try:
+            filename = _sanitize_filename(file.filename)
+            logger.info(f"Processing upload: {filename}")
+            if not filename.lower().endswith(".csv"):
+                raise HTTPException(status_code=400, detail=f"File {filename} is not CSV.")
 
-        destination = UPLOAD_DIR / f"{timestamp}-{idx}-{filename}"
-        with destination.open("wb") as buffer:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                buffer.write(chunk)
+            destination = UPLOAD_DIR / f"{timestamp}-{idx}-{filename}"
+            logger.info(f"Saving file to: {destination}")
+            with destination.open("wb") as buffer:
+                while True:
+                    chunk = await file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    buffer.write(chunk)
 
-        summary = summarize_csv(destination)
-        upload_id = str(uuid4())
-        uploads[upload_id] = {
-            "id": upload_id,
-            "filename": filename,
-            "saved_as": str(destination),
-            "status": "uploaded",
-            "repos": summary.get("repos", []),
-            "total_commits": summary.get("total_commits", 0),
-            "uploaded_at": datetime.utcnow().isoformat() + "Z",
-            "job_id": None,
-            "error": None,
-        }
-        scanner.checkpoint.upsert_upload(uploads[upload_id])
+            logger.info(f"File saved, summarizing CSV...")
+            summary = summarize_csv(destination)
+            logger.info(f"Summary complete: {summary.get('total_commits', 0)} commits")
+            
+            upload_id = str(uuid4())
+            uploads[upload_id] = {
+                "id": upload_id,
+                "filename": filename,
+                "saved_as": str(destination),
+                "status": "uploaded",
+                "repos": summary.get("repos", []),
+                "total_commits": summary.get("total_commits", 0),
+                "uploaded_at": datetime.utcnow().isoformat() + "Z",
+                "job_id": None,
+                "error": None,
+            }
+            logger.info(f"Upserting upload to DB...")
+            scanner.checkpoint.upsert_upload(uploads[upload_id])
 
-        entry = {
-            "filename": filename,
-            "saved_as": str(destination),
-            "scan_started": False,
-            "upload_id": upload_id,
-            "repos": summary.get("repos", []),
-            "total_commits": summary.get("total_commits", 0),
-        }
+            entry = {
+                "filename": filename,
+                "saved_as": str(destination),
+                "scan_started": False,
+                "upload_id": upload_id,
+                "repos": summary.get("repos", []),
+                "total_commits": summary.get("total_commits", 0),
+            }
 
-        results.append(entry)
+            results.append(entry)
+            logger.info(f"Upload {filename} processed successfully")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception(f"Error processing upload {file.filename}: {e}")
+            raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
 
     return JSONResponse({"results": results})
 
