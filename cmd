@@ -7,3 +7,5 @@ curl -u "admin:admin" -X POST \
 
 docker compose up -d --build
 sudo rm -r work_dir/
+
+docker compose down sonarqube db -v

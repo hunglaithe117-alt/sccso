@@ -104,23 +104,32 @@ def summarize_csv(csv_path: Path) -> Dict:
     summary = {}
     total = 0
     try:
-        for chunk in pd.read_csv(csv_path, chunksize=Config.BATCH_SIZE):
-            for row in chunk.to_dict("records"):
-                repo_url = row.get("repo_url")
-                gh_project_name = row.get("gh_project_name")
-                if gh_project_name and not repo_url:
-                    repo_url = f"https://github.com/{gh_project_name}.git"
-                if not repo_url:
-                    continue
+        # Đọc toàn bộ file thay vì dùng chunksize để tránh lỗi với file nhỏ
+        # Thêm on_bad_lines để bỏ qua các dòng lỗi, engine='python' để xử lý tốt hơn
+        df = pd.read_csv(
+            csv_path,
+            on_bad_lines='skip',
+            engine='python',
+            encoding='utf-8',
+            encoding_errors='replace',
+            low_memory=False,
+        )
+        for row in df.to_dict("records"):
+            repo_url = row.get("repo_url")
+            gh_project_name = row.get("gh_project_name")
+            if gh_project_name and not repo_url:
+                repo_url = f"https://github.com/{gh_project_name}.git"
+            if not repo_url:
+                continue
 
-                slug = repo_url.split("github.com/")[-1].replace(".git", "") if "github.com" in repo_url else None
-                owner = None
-                repo_name = repo_url.split("/")[-1].replace(".git", "")
-                if slug and "/" in slug:
-                    owner, repo_name = slug.split("/", 1)
-                key = f"{owner}_{repo_name}" if owner else repo_name
-                summary[key] = summary.get(key, 0) + 1
-                total += 1
+            slug = repo_url.split("github.com/")[-1].replace(".git", "") if "github.com" in repo_url else None
+            owner = None
+            repo_name = repo_url.split("/")[-1].replace(".git", "")
+            if slug and "/" in slug:
+                owner, repo_name = slug.split("/", 1)
+            key = f"{owner}_{repo_name}" if owner else repo_name
+            summary[key] = summary.get(key, 0) + 1
+            total += 1
     except Exception as exc:
         logger.warning(f"Failed to summarize CSV {csv_path}: {exc}")
 
