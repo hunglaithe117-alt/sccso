@@ -85,69 +85,70 @@ DEFAULT_TIMEOUT = 30
 # }
 
 ALL_METRIC_KEYS = [
-        "bugs",
-        "reliability_issues",
-        "reliability_rating",
-        "software_quality_reliability_remediation_effort",
-        "software_quality_reliability_issues",
-        "reliability_remediation_effort",
-        "software_quality_reliability_rating",
-        "vulnerabilities",
-        "security_issues",
-        "security_rating",
-        "security_hotspots",
-        "software_quality_security_rating",
-        "software_quality_security_issues",
-        "software_quality_security_remediation_effort",
-        "security_remediation_effort",
-        "security_review_rating",
-        "security_hotspots_to_review_status",
-        "code_smells",
-        "sqale_index",
-        "sqale_debt_ratio",
-        "sqale_rating",
-        "maintainability_issues",
-        "development_cost",
-        "effort_to_reach_maintainability_rating_a",
-        "software_quality_maintainability_debt_ratio",
-        "software_quality_maintainability_remediation_effort",
-        "software_quality_maintainability_rating",
-        "effort_to_reach_software_quality_maintainability_rating_a",
-        "coverage",
-        "line_coverage",
-        "lines_to_cover",
-        "uncovered_lines",
-        "duplicated_lines_density",
-        "duplicated_lines",
-        "duplicated_blocks",
-        "duplicated_files",
-        "cognitive_complexity",
-        "complexity",
-        "ncloc",
-        "lines",
-        "files",
-        "classes",
-        "functions",
-        "statements",
-        "ncloc_language_distribution",
-        "comment_lines_density",
-        "comment_lines",
-        "alert_status",
-        "quality_gate_details",
-        "software_quality_blocker_issues",
-        "critical_violations",
-        "violations",
-        "software_quality_high_issues",
-        "info_violations",
-        "software_quality_low_issues",
-        "software_quality_maintainability_issues",
-        "software_quality_info_issues",
-        "minor_violations",
-        "major_violations",
-        "software_quality_medium_issues",
-        "open_issues",
-        "last_commit_date",
-    ]
+    "bugs",
+    "reliability_issues",
+    "reliability_rating",
+    "software_quality_reliability_remediation_effort",
+    "software_quality_reliability_issues",
+    "reliability_remediation_effort",
+    "software_quality_reliability_rating",
+    "vulnerabilities",
+    "security_issues",
+    "security_rating",
+    "security_hotspots",
+    "software_quality_security_rating",
+    "software_quality_security_issues",
+    "software_quality_security_remediation_effort",
+    "security_remediation_effort",
+    "security_review_rating",
+    "security_hotspots_to_review_status",
+    "code_smells",
+    "sqale_index",
+    "sqale_debt_ratio",
+    "sqale_rating",
+    "maintainability_issues",
+    "development_cost",
+    "effort_to_reach_maintainability_rating_a",
+    "software_quality_maintainability_debt_ratio",
+    "software_quality_maintainability_remediation_effort",
+    "software_quality_maintainability_rating",
+    "effort_to_reach_software_quality_maintainability_rating_a",
+    "coverage",
+    "line_coverage",
+    "lines_to_cover",
+    "uncovered_lines",
+    "duplicated_lines_density",
+    "duplicated_lines",
+    "duplicated_blocks",
+    "duplicated_files",
+    "cognitive_complexity",
+    "complexity",
+    "ncloc",
+    "lines",
+    "files",
+    "classes",
+    "functions",
+    "statements",
+    "ncloc_language_distribution",
+    "comment_lines_density",
+    "comment_lines",
+    "alert_status",
+    "quality_gate_details",
+    "software_quality_blocker_issues",
+    "critical_violations",
+    "violations",
+    "software_quality_high_issues",
+    "info_violations",
+    "software_quality_low_issues",
+    "software_quality_maintainability_issues",
+    "software_quality_info_issues",
+    "minor_violations",
+    "major_violations",
+    "software_quality_medium_issues",
+    "open_issues",
+    "last_commit_date",
+]
+
 
 def build_session(
     *,
@@ -181,13 +182,17 @@ def build_session(
         username, password = auth.split(":", 1)
         session.auth = (username, password)
     else:
-        raise ValueError("Provide --token or --auth formatted as 'username:password' or 'token:'.")
+        raise ValueError(
+            "Provide --token or --auth formatted as 'username:password' or 'token:'."
+        )
 
     session.headers["Accept"] = "application/json"
     return session
 
 
-def request_json(session: requests.Session, url: str, params: Optional[Dict] = None) -> Dict:
+def request_json(
+    session: requests.Session, url: str, params: Optional[Dict] = None
+) -> Dict:
     """GET JSON with timeout and raise for non-2xx."""
     resp = session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
     # For 429/5xx, Retry adapter handles backoff; still raise if after retries.
@@ -195,7 +200,9 @@ def request_json(session: requests.Session, url: str, params: Optional[Dict] = N
     return resp.json()
 
 
-def fetch_all_projects(session: requests.Session, base_url: str, qualifier: str = "TRK") -> List[str]:
+def fetch_all_projects(
+    session: requests.Session, base_url: str, qualifier: str = "TRK"
+) -> List[str]:
     """Fetch all project keys from SonarQube via /api/projects/search (paginated)."""
     projects: List[str] = []
     page = 1
@@ -262,7 +269,9 @@ def parse_component_key(component_key: str) -> Tuple[str, str]:
     if len(parts) >= 2:
         # Find the last part that looks like a commit SHA (40 chars hex)
         for i in range(len(parts) - 1, -1, -1):
-            if len(parts[i]) == 40 and all(c in "0123456789abcdef" for c in parts[i].lower()):
+            if len(parts[i]) == 40 and all(
+                c in "0123456789abcdef" for c in parts[i].lower()
+            ):
                 repo = "_".join(parts[:i])
                 commit = parts[i]
                 return repo, commit
@@ -337,7 +346,26 @@ def export_to_csv(all_projects_data: List[Dict], output_file: Path) -> None:
             writer.writerow(row)
 
 
-def measures_to_row(component_key: str, metrics: List[str], measures: List[Dict]) -> Dict[str, str]:
+def is_project_pending(measures: List[Dict]) -> bool:
+    """
+    Check if a project is pending (not yet analyzed).
+    A project is considered pending if it has no measures or all measures are empty.
+    """
+    if not measures:
+        return True
+    # Check if all measures have no value
+    for measure in measures:
+        value = measure.get("value")
+        if value is None and measure.get("periods"):
+            value = measure["periods"][0].get("value")
+        if value is not None and str(value).strip():
+            return False
+    return True
+
+
+def measures_to_row(
+    component_key: str, metrics: List[str], measures: List[Dict]
+) -> Dict[str, str]:
     """Convert measures list to a CSV row {metric -> value} plus repo/commit."""
     repo, commit = parse_component_key(component_key)
     row: Dict[str, str] = {"repo": repo, "commit": commit}
@@ -363,33 +391,80 @@ def main() -> None:
             "fetch all metric keys, and stream results to CSV/JSONL."
         )
     )
-    parser.add_argument("--sonar_host", required=True, help="SonarQube host URL, e.g. http://localhost:9000")
+    parser.add_argument(
+        "--sonar_host",
+        required=True,
+        help="SonarQube host URL, e.g. http://localhost:9000",
+    )
     # Auth options: prefer token, keep --auth for backward compatibility
     parser.add_argument("--token", help="SonarQube user token (preferred).")
     parser.add_argument("--auth", help="Alternative auth as 'user:pass' or 'token:'")
 
     # Project sources
     parser.add_argument("--project_keys", nargs="*", help="List of project keys")
-    parser.add_argument("--project_keys_file", help="File containing project keys, one per line or CSV")
-    parser.add_argument("--all_projects", action="store_true", help="Fetch all projects from SonarQube automatically")
-    parser.add_argument("--qualifier", default="TRK", help="Component qualifier when crawling (default: TRK)")
+    parser.add_argument(
+        "--project_keys_file", help="File containing project keys, one per line or CSV"
+    )
+    parser.add_argument(
+        "--all_projects",
+        action="store_true",
+        help="Fetch all projects from SonarQube automatically",
+    )
+    parser.add_argument(
+        "--qualifier",
+        default="TRK",
+        help="Component qualifier when crawling (default: TRK)",
+    )
 
     # Output / pipeline controls
-    parser.add_argument("--output_dir", default="results", help="Directory to save outputs (default: results)")
-    parser.add_argument("--chunk_size", type=int, default=50, help="Number of metrics per API call (default 50)")
-    parser.add_argument("--max_workers", type=int, default=8, help="Max concurrent projects (default 8)")
-    parser.add_argument("--per_chunk_delay", type=float, default=0.05, help="Delay between metric chunk calls (default 0.05s)")
-    parser.add_argument("--resume", action="store_true", help="Resume from progress file; skip processed projects")
-    parser.add_argument("--jsonl", action="store_true", help="Also write JSONL lines per project for auditing")
+    parser.add_argument(
+        "--output_dir",
+        default="results",
+        help="Directory to save outputs (default: results)",
+    )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=50,
+        help="Number of metrics per API call (default 50)",
+    )
+    parser.add_argument(
+        "--max_workers", type=int, default=8, help="Max concurrent projects (default 8)"
+    )
+    parser.add_argument(
+        "--per_chunk_delay",
+        type=float,
+        default=0.05,
+        help="Delay between metric chunk calls (default 0.05s)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from progress file; skip processed projects",
+    )
+    parser.add_argument(
+        "--jsonl",
+        action="store_true",
+        help="Also write JSONL lines per project for auditing",
+    )
 
     # Retry tuning
-    parser.add_argument("--retries", type=int, default=3, help="HTTP retries (default 3)")
-    parser.add_argument("--backoff", type=float, default=0.5, help="Retry backoff factor (default 0.5)")
+    parser.add_argument(
+        "--retries", type=int, default=3, help="HTTP retries (default 3)"
+    )
+    parser.add_argument(
+        "--backoff", type=float, default=0.5, help="Retry backoff factor (default 0.5)"
+    )
 
     args = parser.parse_args()
 
     base_url = args.sonar_host.rstrip("/")
-    session = build_session(token=args.token, auth=args.auth, retries=args.retries, backoff_factor=args.backoff)
+    session = build_session(
+        token=args.token,
+        auth=args.auth,
+        retries=args.retries,
+        backoff_factor=args.backoff,
+    )
 
     # Resolve project keys
     project_keys: List[str] = []
@@ -417,7 +492,9 @@ def main() -> None:
     project_keys = [k for k in project_keys if not (k in seen or seen.add(k))]
 
     if not project_keys:
-        print("❌ No project keys provided. Use --project_keys, --project_keys_file, or --all_projects")
+        print(
+            "❌ No project keys provided. Use --project_keys, --project_keys_file, or --all_projects"
+        )
         return
 
     # Prepare output paths and progress
@@ -431,10 +508,16 @@ def main() -> None:
 
     processed: Set[str] = set()
     if args.resume and done_file.exists():
-        processed = {line.strip() for line in done_file.read_text(encoding="utf-8").splitlines() if line.strip()}
+        processed = {
+            line.strip()
+            for line in done_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        }
         before = len(project_keys)
         project_keys = [k for k in project_keys if k not in processed]
-        print(f"🔁 Resume enabled: skipping {before - len(project_keys)} already processed projects")
+        print(
+            f"🔁 Resume enabled: skipping {before - len(project_keys)} already processed projects"
+        )
 
     # Use a fixed list of metric keys (user-specified) instead of fetching all metrics
     # This restricts the exporter to only query the metrics needed.
@@ -453,25 +536,40 @@ def main() -> None:
             writer.writeheader()
 
     total_projects = len(project_keys)
-    print(f"🚀 Exporting {total_projects} projects with up to {args.max_workers} workers…")
+    print(
+        f"🚀 Exporting {total_projects} projects with up to {args.max_workers} workers…"
+    )
 
-    def process_project(key: str) -> Tuple[str, Dict[str, str], Dict]:
+    def process_project(key: str) -> Tuple[str, Dict[str, str], Dict, bool]:
         measures = fetch_all_measures_for_project(
-            session, base_url, key, ALL_METRIC_KEYS, args.chunk_size, args.per_chunk_delay
+            session,
+            base_url,
+            key,
+            ALL_METRIC_KEYS,
+            args.chunk_size,
+            args.per_chunk_delay,
         )
+        is_pending = is_project_pending(measures)
         row = measures_to_row(key, ALL_METRIC_KEYS, measures)
         project_json = {"component": key, "measures": measures}
-        return key, row, project_json
+        return key, row, project_json, is_pending
 
     success = 0
     failures = 0
+    skipped_pending = 0
 
     with ThreadPoolExecutor(max_workers=max(1, args.max_workers)) as pool:
         futures = {pool.submit(process_project, key): key for key in project_keys}
         for idx, fut in enumerate(as_completed(futures), start=1):
             key = futures[fut]
             try:
-                k, row, project_json = fut.result()
+                k, row, project_json, is_pending = fut.result()
+
+                # Skip pending projects (no measures data)
+                if is_pending:
+                    skipped_pending += 1
+                    continue
+
                 # Stream CSV row
                 with csv_lock:
                     with csv_path.open("a", newline="", encoding="utf-8") as csv_handle:
@@ -481,7 +579,9 @@ def main() -> None:
                 if args.jsonl:
                     with jsonl_lock:
                         with jsonl_path.open("a", encoding="utf-8") as jh:
-                            jh.write(json.dumps(project_json, ensure_ascii=False) + "\n")
+                            jh.write(
+                                json.dumps(project_json, ensure_ascii=False) + "\n"
+                            )
                 # Update progress
                 with progress_lock:
                     with done_file.open("a", encoding="utf-8") as ph:
@@ -494,7 +594,9 @@ def main() -> None:
                 print(f"  ❌ Failed {key}: {exc}")
 
     print("\n🎉 Export complete!")
-    print(f"  → Success: {success}, Failed: {failures}")
+    print(
+        f"  → Success: {success}, Failed: {failures}, Pending (skipped): {skipped_pending}"
+    )
     print(f"  → CSV: {csv_path}")
     if args.jsonl:
         print(f"  → JSONL: {jsonl_path}")
