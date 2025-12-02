@@ -71,7 +71,9 @@ class MiniScanner:
                     try:
                         with self._get_repo_lock(repo_dir.name):
                             self.run_command(
-                                ["git", "worktree", "prune"], cwd=repo_dir, allow_fail=True
+                                ["git", "worktree", "prune"],
+                                cwd=repo_dir,
+                                allow_fail=True,
                             )
                     except Exception as e:
                         logger.warning(f"Failed to prune worktrees for {repo_dir}: {e}")
@@ -114,7 +116,7 @@ class MiniScanner:
                 except Exception:
                     pass
         return repo_path
- 
+
     def prepare_workspace(self, repo_name, project_key):
         """
         Create a git worktree for this job instead of cloning the whole repo.
@@ -123,7 +125,9 @@ class MiniScanner:
         workspace_path = self.temp_dir / project_key
 
         if not master_repo_path.exists():
-            raise RuntimeError(f"Master repo {repo_name} not prepared at {master_repo_path}")
+            raise RuntimeError(
+                f"Master repo {repo_name} not prepared at {master_repo_path}"
+            )
 
         repo_lock = self._get_repo_lock(repo_name)
         with repo_lock:
@@ -239,7 +243,9 @@ class MiniScanner:
         Poll SonarQube Compute Engine until tasks for this project finish, to avoid fetching empty measures.
         """
         if not Config.SONAR_HOST_URL or not Config.SONAR_TOKEN:
-            logger.warning("Cannot wait for Compute Engine (missing SONAR_HOST_URL or SONAR_TOKEN).")
+            logger.warning(
+                "Cannot wait for Compute Engine (missing SONAR_HOST_URL or SONAR_TOKEN)."
+            )
             return
 
         deadline = time.time() + Config.WAIT_FOR_CE_TIMEOUT
@@ -248,7 +254,9 @@ class MiniScanner:
 
         while time.time() < deadline:
             try:
-                resp = requests.get(url, params={"component": project_key}, auth=auth, timeout=30)
+                resp = requests.get(
+                    url, params={"component": project_key}, auth=auth, timeout=30
+                )
                 if resp.status_code == 401:
                     logger.warning("Unauthorized to query CE status; skipping wait.")
                     return
@@ -267,7 +275,9 @@ class MiniScanner:
                     status = current.get("status")
                     task_id = current.get("id")
                     if status in {"SUCCESS", "FAILED", "CANCELED"}:
-                        logger.info(f"CE task {task_id} for {project_key} finished with {status}")
+                        logger.info(
+                            f"CE task {task_id} for {project_key} finished with {status}"
+                        )
                         if status == "SUCCESS":
                             return
                         else:
@@ -297,7 +307,11 @@ class MiniScanner:
             logger.warning(f"Skipping row - missing repo_url or commit_sha: {row}")
             return False
 
-        repo_slug = repo_url.split("github.com/")[-1].replace(".git", "") if "github.com" in repo_url else None
+        repo_slug = (
+            repo_url.split("github.com/")[-1].replace(".git", "")
+            if "github.com" in repo_url
+            else None
+        )
         owner = None
         repo_name = repo_url.split("/")[-1].replace(".git", "")
         if repo_slug and "/" in repo_slug:
@@ -373,19 +387,26 @@ class MiniScanner:
                 with repo_lock:
                     try:
                         self.run_command(
-                            ["git", "worktree", "remove", str(workspace_path), "--force"],
+                            [
+                                "git",
+                                "worktree",
+                                "remove",
+                                str(workspace_path),
+                                "--force",
+                            ],
                             cwd=self.repos_dir / repo_name,
                             allow_fail=True,
                         )
                     except Exception as e:
-                        logger.warning(f"Failed to remove worktree {workspace_path}: {e}")
+                        logger.warning(
+                            f"Failed to remove worktree {workspace_path}: {e}"
+                        )
                 shutil.rmtree(workspace_path, ignore_errors=True)
 
     def process_csv(self, csv_path, batch_size=Config.BATCH_SIZE):
         logger.info(f"Processing {csv_path} in batches of {batch_size}")
 
         try:
-            futures = []
             with ThreadPoolExecutor(max_workers=Config.CONCURRENT_SCANS) as executor:
                 for batch_idx, df_chunk in enumerate(
                     pd.read_csv(csv_path, chunksize=batch_size)
@@ -417,17 +438,35 @@ class MiniScanner:
                                 f"Failed to prepare repo {repo_name} ({repo_url}): {e}"
                             )
 
+                    # Process batch and WAIT for completion before next batch
+                    batch_futures = []
                     for row in rows:
-                        futures.append(executor.submit(self.process_single_job, row))
+                        batch_futures.append(
+                            executor.submit(self.process_single_job, row)
+                        )
 
-                    logger.info(f"--- Scheduled Batch {batch_idx + 1} ({len(rows)} jobs) ---")
+                    logger.info(
+                        f"--- Scheduled Batch {batch_idx + 1} ({len(rows)} jobs) ---"
+                    )
 
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        logger.error(f"Job failed with exception: {e}")
+                    # Wait for all jobs in THIS batch to complete before processing next batch
+                    completed = 0
+                    failed = 0
+                    for future in as_completed(batch_futures):
+                        try:
+                            result = future.result()
+                            if result:
+                                completed += 1
+                            else:
+                                failed += 1
+                        except Exception as e:
+                            logger.error(f"Job failed with exception: {e}")
+                            failed += 1
 
-            logger.info("--- All batches scheduled and completed ---")
+                    logger.info(
+                        f"--- Batch {batch_idx + 1} completed: {completed} success, {failed} failed ---"
+                    )
+
+            logger.info("--- All batches completed ---")
         except Exception as e:
             logger.error(f"Failed to process CSV {csv_path}: {e}")
