@@ -17,7 +17,10 @@ logger = logging.getLogger(__name__)
 
 # Initialize scanner and storage
 scanner = MiniScanner()
-scanner.checkpoint.reset_upload_states()
+# Only reset queued/running uploads when auto-resume is disabled.
+# If AUTO_RESUME is true, keep their status so we can pick them up and resume.
+if not Config.AUTO_RESUME:
+    scanner.checkpoint.reset_upload_states()
 UPLOAD_DIR = Path(Config.WORK_DIR) / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
