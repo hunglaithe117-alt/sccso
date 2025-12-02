@@ -1,3 +1,4 @@
+import csv
 import logging
 from collections import deque
 from datetime import datetime
@@ -6,7 +7,6 @@ from threading import Condition, Lock, Thread
 from typing import Dict, List, Tuple
 from uuid import uuid4
 
-import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -100,36 +100,29 @@ def start_scan(csv_path: Path, upload_id: str = None) -> str:
 def summarize_csv(csv_path: Path) -> Dict:
     """
     Return per-repo commit counts for a CSV.
+    Uses csv module instead of pandas to avoid memory/crash issues with large files.
     """
     summary = {}
     total = 0
     try:
-        # Đọc toàn bộ file thay vì dùng chunksize để tránh lỗi với file nhỏ
-        # Thêm on_bad_lines để bỏ qua các dòng lỗi, engine='python' để xử lý tốt hơn
-        df = pd.read_csv(
-            csv_path,
-            on_bad_lines='skip',
-            engine='python',
-            encoding='utf-8',
-            encoding_errors='replace',
-            low_memory=False,
-        )
-        for row in df.to_dict("records"):
-            repo_url = row.get("repo_url")
-            gh_project_name = row.get("gh_project_name")
-            if gh_project_name and not repo_url:
-                repo_url = f"https://github.com/{gh_project_name}.git"
-            if not repo_url:
-                continue
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                repo_url = row.get("repo_url")
+                gh_project_name = row.get("gh_project_name")
+                if gh_project_name and not repo_url:
+                    repo_url = f"https://github.com/{gh_project_name}.git"
+                if not repo_url:
+                    continue
 
-            slug = repo_url.split("github.com/")[-1].replace(".git", "") if "github.com" in repo_url else None
-            owner = None
-            repo_name = repo_url.split("/")[-1].replace(".git", "")
-            if slug and "/" in slug:
-                owner, repo_name = slug.split("/", 1)
-            key = f"{owner}_{repo_name}" if owner else repo_name
-            summary[key] = summary.get(key, 0) + 1
-            total += 1
+                slug = repo_url.split("github.com/")[-1].replace(".git", "") if "github.com" in repo_url else None
+                owner = None
+                repo_name = repo_url.split("/")[-1].replace(".git", "")
+                if slug and "/" in slug:
+                    owner, repo_name = slug.split("/", 1)
+                key = f"{owner}_{repo_name}" if owner else repo_name
+                summary[key] = summary.get(key, 0) + 1
+                total += 1
     except Exception as exc:
         logger.warning(f"Failed to summarize CSV {csv_path}: {exc}")
 
