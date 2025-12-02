@@ -35,7 +35,8 @@ class MiniScanner:
         self.locks_dir.mkdir(parents=True, exist_ok=True)
 
         self.checkpoint = CheckpointManager(Config.CHECKPOINT_FILE)
-        self.checkpoint.reset_pending_jobs()
+        # Don't reset pending jobs - they will be resumed on restart
+        # self.checkpoint.reset_pending_jobs()
         self.github = GitHubAPI(Config.GITHUB_TOKENS) if Config.GITHUB_TOKENS else None
         self.cleanup_stale_worktrees()
 

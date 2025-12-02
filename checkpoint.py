@@ -132,6 +132,61 @@ class CheckpointManager:
         except Exception as e:
             logger.error(f"Failed to reset upload states: {e}")
 
+    def get_resumable_uploads(self, include_error: bool = False) -> List[Dict]:
+        """
+        Get uploads that were interrupted (running/queued) or optionally failed.
+        These can be auto-resumed on startup.
+        """
+        try:
+            statuses = ['queued', 'running']
+            if include_error:
+                statuses.append('error')
+            placeholders = ','.join('?' * len(statuses))
+            with self._get_conn() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT id, filename, saved_as, status, total_commits, repos_json, job_id, error_msg, uploaded_at
+                    FROM uploads
+                    WHERE status IN ({placeholders})
+                    ORDER BY uploaded_at ASC
+                    """,
+                    statuses
+                ).fetchall()
+            result = []
+            for row in rows:
+                result.append({
+                    "id": row[0],
+                    "filename": row[1],
+                    "saved_as": row[2],
+                    "status": row[3],
+                    "total_commits": row[4] or 0,
+                    "repos": json.loads(row[5] or "[]"),
+                    "job_id": row[6],
+                    "error": row[7],
+                    "uploaded_at": row[8],
+                })
+            return result
+        except Exception as e:
+            logger.error(f"Failed to get resumable uploads: {e}")
+            return []
+
+    def mark_upload_for_resume(self, upload_id: str):
+        """
+        Mark an upload for resuming (reset to 'uploaded' status).
+        """
+        try:
+            with self._get_conn() as conn:
+                conn.execute(
+                    """
+                    UPDATE uploads
+                    SET status = 'uploaded', job_id = NULL, error_msg = NULL
+                    WHERE id = ?
+                    """,
+                    (upload_id,)
+                )
+        except Exception as e:
+            logger.error(f"Failed to mark upload {upload_id} for resume: {e}")
+
     def try_claim_commit(
         self,
         commit_sha: str,
@@ -141,10 +196,37 @@ class CheckpointManager:
     ) -> bool:
         """
         Attempt to claim a commit for processing.
-        Returns True if claimed; False if already present (pending/processed/failed).
+        Returns True if claimed or was PENDING (resume).
+        Returns False if already PROCESSED or FAILED.
         """
         try:
             with self._get_conn() as conn:
+                # Check existing status
+                existing = conn.execute(
+                    "SELECT status FROM scans WHERE commit_sha = ?",
+                    (commit_sha,)
+                ).fetchone()
+                
+                if existing:
+                    status = existing[0]
+                    if status in ('PROCESSED', 'FAILED'):
+                        # Already done, skip
+                        return False
+                    # status == 'PENDING': Resume from crash - update timestamp and continue
+                    conn.execute(
+                        """
+                        UPDATE scans SET updated_at = ?,
+                            repo_name = COALESCE(?, repo_name),
+                            project_key = COALESCE(?, project_key),
+                            repo_url = COALESCE(?, repo_url)
+                        WHERE commit_sha = ?
+                        """,
+                        (time.time(), repo_name, project_key, repo_url, commit_sha)
+                    )
+                    logger.info(f"Resuming PENDING commit: {commit_sha}")
+                    return True
+                
+                # New commit, insert
                 conn.execute(
                     """
                     INSERT INTO scans (commit_sha, status, repo_name, project_key, repo_url, updated_at)
@@ -152,7 +234,7 @@ class CheckpointManager:
                     """,
                     (commit_sha, repo_name, project_key, repo_url, time.time()),
                 )
-            return True
+                return True
         except sqlite3.IntegrityError:
             return False
         except Exception as e:
@@ -347,3 +429,66 @@ class CheckpointManager:
                 )
         except Exception as e:
             logger.error(f"Failed to update upload {upload_id}: {e}")
+
+    def get_scan_progress(self, repo_names: Optional[List[str]] = None) -> Dict:
+        """
+        Get scan progress for given repos or all repos.
+        Returns counts of PENDING, PROCESSED, FAILED commits.
+        """
+        try:
+            with self._get_conn() as conn:
+                if repo_names:
+                    placeholders = ','.join('?' * len(repo_names))
+                    rows = conn.execute(
+                        f"""
+                        SELECT status, COUNT(*) FROM scans
+                        WHERE repo_name IN ({placeholders})
+                        GROUP BY status
+                        """,
+                        repo_names
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT status, COUNT(*) FROM scans GROUP BY status"
+                    ).fetchall()
+                
+                result = {'PENDING': 0, 'PROCESSED': 0, 'FAILED': 0}
+                for status, count in rows:
+                    if status in result:
+                        result[status] = count
+                result['total'] = sum(result.values())
+                return result
+        except Exception as e:
+            logger.error(f"Failed to get scan progress: {e}")
+            return {'PENDING': 0, 'PROCESSED': 0, 'FAILED': 0, 'total': 0}
+
+    def get_pending_commits(self, limit: int = 100) -> List[Dict]:
+        """
+        Get list of PENDING commits that need to be processed.
+        Useful for showing what will be resumed.
+        """
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT commit_sha, repo_name, project_key, repo_url, updated_at
+                    FROM scans
+                    WHERE status = 'PENDING'
+                    ORDER BY updated_at ASC
+                    LIMIT ?
+                    """,
+                    (limit,)
+                ).fetchall()
+                return [
+                    {
+                        'commit_sha': row[0],
+                        'repo_name': row[1],
+                        'project_key': row[2],
+                        'repo_url': row[3],
+                        'updated_at': row[4],
+                    }
+                    for row in rows
+                ]
+        except Exception as e:
+            logger.error(f"Failed to get pending commits: {e}")
+            return []

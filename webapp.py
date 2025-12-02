@@ -37,6 +37,48 @@ def _load_uploads_from_db():
         uploads[row["id"]] = row
 
 
+def _auto_resume_uploads():
+    """
+    Automatically resume uploads that were interrupted (running/queued) or failed on previous run.
+    Called once on startup.
+    """
+    if not Config.AUTO_RESUME:
+        logger.info("Auto-resume disabled, skipping...")
+        return
+    
+    resumable = scanner.checkpoint.get_resumable_uploads(include_error=Config.AUTO_RESUME_ERROR)
+    if not resumable:
+        logger.info("No uploads to auto-resume.")
+        return
+    
+    logger.info(f"Found {len(resumable)} uploads to auto-resume")
+    for upload in resumable:
+        upload_id = upload["id"]
+        saved_as = upload.get("saved_as")
+        filename = upload.get("filename", "unknown")
+        prev_status = upload.get("status")
+        
+        if not saved_as or not Path(saved_as).exists():
+            logger.warning(f"Skipping auto-resume for {filename}: file not found at {saved_as}")
+            continue
+        
+        logger.info(f"Auto-resuming upload '{filename}' (prev status: {prev_status})")
+        
+        # Reset status first
+        scanner.checkpoint.mark_upload_for_resume(upload_id)
+        
+        # Queue for scanning
+        job_id = start_scan(Path(saved_as), upload_id=upload_id)
+        
+        # Update in-memory state
+        if upload_id in uploads:
+            uploads[upload_id]["status"] = "queued"
+            uploads[upload_id]["job_id"] = job_id
+        
+        scanner.checkpoint.update_upload_status(upload_id, status="queued", job_id=job_id)
+        logger.info(f"Queued auto-resume job {job_id} for {filename}")
+
+
 _load_uploads_from_db()
 
 
@@ -52,7 +94,9 @@ def _job_worker():
         if upload_id and upload_id in uploads:
             uploads[upload_id]["status"] = "running"
             uploads[upload_id]["job_id"] = job_id
-            scanner.checkpoint.update_upload_status(upload_id, status="running", job_id=job_id)
+            scanner.checkpoint.update_upload_status(
+                upload_id, status="running", job_id=job_id
+            )
 
         try:
             scanner.check_dependencies()
@@ -63,7 +107,9 @@ def _job_worker():
             if upload_id and upload_id in uploads:
                 uploads[upload_id]["status"] = "completed"
                 uploads[upload_id]["job_id"] = job_id
-                scanner.checkpoint.update_upload_status(upload_id, status="completed", job_id=job_id, error=None)
+                scanner.checkpoint.update_upload_status(
+                    upload_id, status="completed", job_id=job_id, error=None
+                )
         except Exception as exc:
             logger.exception("Scan failed", exc_info=exc)
             jobs[job_id]["status"] = "error"
@@ -73,10 +119,15 @@ def _job_worker():
                 uploads[upload_id]["status"] = "error"
                 uploads[upload_id]["error"] = str(exc)
                 uploads[upload_id]["job_id"] = job_id
-                scanner.checkpoint.update_upload_status(upload_id, status="error", job_id=job_id, error=str(exc))
+                scanner.checkpoint.update_upload_status(
+                    upload_id, status="error", job_id=job_id, error=str(exc)
+                )
 
 
 Thread(target=_job_worker, daemon=True).start()
+
+# Auto-resume interrupted uploads on startup
+_auto_resume_uploads()
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -115,7 +166,11 @@ def summarize_csv(csv_path: Path) -> Dict:
                 if not repo_url:
                     continue
 
-                slug = repo_url.split("github.com/")[-1].replace(".git", "") if "github.com" in repo_url else None
+                slug = (
+                    repo_url.split("github.com/")[-1].replace(".git", "")
+                    if "github.com" in repo_url
+                    else None
+                )
                 owner = None
                 repo_name = repo_url.split("/")[-1].replace(".git", "")
                 if slug and "/" in slug:
@@ -541,7 +596,9 @@ async def index():
   </script>
 </body>
 </html>
-        """.replace("{work_dir}", str(Config.WORK_DIR))
+        """.replace(
+            "{work_dir}", str(Config.WORK_DIR)
+        )
     )
 
 
@@ -550,7 +607,9 @@ async def upload_csv(
     files: List[UploadFile] = File(...),
 ):
     if not files:
-        raise HTTPException(status_code=400, detail="Please upload at least one CSV file.")
+        raise HTTPException(
+            status_code=400, detail="Please upload at least one CSV file."
+        )
 
     results = []
     timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
@@ -559,7 +618,9 @@ async def upload_csv(
             filename = _sanitize_filename(file.filename)
             logger.info(f"Processing upload: {filename}")
             if not filename.lower().endswith(".csv"):
-                raise HTTPException(status_code=400, detail=f"File {filename} is not CSV.")
+                raise HTTPException(
+                    status_code=400, detail=f"File {filename} is not CSV."
+                )
 
             destination = UPLOAD_DIR / f"{timestamp}-{idx}-{filename}"
             logger.info(f"Saving file to: {destination}")
@@ -573,7 +634,7 @@ async def upload_csv(
             logger.info(f"File saved, summarizing CSV...")
             summary = summarize_csv(destination)
             logger.info(f"Summary complete: {summary.get('total_commits', 0)} commits")
-            
+
             upload_id = str(uuid4())
             uploads[upload_id] = {
                 "id": upload_id,
@@ -604,7 +665,9 @@ async def upload_csv(
             raise
         except Exception as e:
             logger.exception(f"Error processing upload {file.filename}: {e}")
-            raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+            raise HTTPException(
+                status_code=500, detail=f"Error processing file: {str(e)}"
+            )
 
     return JSONResponse({"results": results})
 
@@ -630,6 +693,22 @@ async def repo_summary():
     return JSONResponse(scanner.checkpoint.get_repo_summary())
 
 
+@app.get("/api/progress")
+async def scan_progress():
+    """
+    Return overall scan progress (PENDING, PROCESSED, FAILED counts).
+    """
+    return JSONResponse(scanner.checkpoint.get_scan_progress())
+
+
+@app.get("/api/pending")
+async def pending_commits(limit: int = 100):
+    """
+    Return list of PENDING commits that will be processed/resumed.
+    """
+    return JSONResponse(scanner.checkpoint.get_pending_commits(limit=limit))
+
+
 @app.get("/api/uploads")
 async def list_uploads():
     _load_uploads_from_db()
@@ -652,7 +731,12 @@ async def scan_upload(upload_id: str):
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found")
     if not _can_start_upload(upload):
-        return JSONResponse({"message": "Upload already queued/running/completed", "job_id": upload.get("job_id")})
+        return JSONResponse(
+            {
+                "message": "Upload already queued/running/completed",
+                "job_id": upload.get("job_id"),
+            }
+        )
 
     job_id = start_scan(Path(upload["saved_as"]), upload_id=upload_id)
     upload["status"] = "queued"
@@ -670,6 +754,8 @@ async def scan_all_pending():
             job_id = start_scan(Path(upload["saved_as"]), upload_id=upload["id"])
             upload["status"] = "queued"
             upload["job_id"] = job_id
-            scanner.checkpoint.update_upload_status(upload["id"], status="queued", job_id=job_id)
+            scanner.checkpoint.update_upload_status(
+                upload["id"], status="queued", job_id=job_id
+            )
             job_ids.append(job_id)
     return JSONResponse({"job_ids": job_ids})

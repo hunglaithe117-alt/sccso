@@ -34,3 +34,7 @@ class Config:
     WAIT_FOR_CE = os.getenv("WAIT_FOR_CE", "true").lower() in {"1", "true", "yes"}
     WAIT_FOR_CE_TIMEOUT = int(os.getenv("WAIT_FOR_CE_TIMEOUT", "600"))  # seconds
     WAIT_FOR_CE_POLL = int(os.getenv("WAIT_FOR_CE_POLL", "5"))  # seconds
+
+    # Auto-resume configuration
+    AUTO_RESUME = os.getenv("AUTO_RESUME", "true").lower() in {"1", "true", "yes"}
+    AUTO_RESUME_ERROR = os.getenv("AUTO_RESUME_ERROR", "false").lower() in {"1", "true", "yes"}  # Also resume failed jobs
