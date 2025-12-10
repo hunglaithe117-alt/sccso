@@ -38,7 +38,7 @@ def build_replay_plan(
     repo_slug: str,
     target_sha: str,
     commit_exists: Callable[[str], bool],
-    max_depth: int = 50,
+    max_depth: int = 100,
 ) -> ReplayPlan:
     """Use the GitHub API to locate patches needed to recreate a fork-only history."""
 
