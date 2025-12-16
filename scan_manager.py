@@ -149,13 +149,13 @@ class MiniScanner:
         return workspace_path
 
     def _commit_exists(self, repo_path, commit_sha):
-        try:
-            self.run_command(
-                ["git", "cat-file", "-e", commit_sha], cwd=repo_path
-            )
-            return True
-        except Exception:
-            return False
+        completed = subprocess.run(
+            ["git", "cat-file", "-e", commit_sha],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+        )
+        return completed.returncode == 0
 
     def checkout_commit(self, repo_path, commit_sha, repo_slug=None):
         logger.info(f"Checking out commit {commit_sha} in {repo_path}")
