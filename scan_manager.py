@@ -151,7 +151,7 @@ class MiniScanner:
     def _commit_exists(self, repo_path, commit_sha):
         try:
             self.run_command(
-                ["git", "cat-file", "-e", f"{commit_sha}^{{commit}}"], cwd=repo_path
+                ["git", "cat-file", "-e", commit_sha], cwd=repo_path
             )
             return True
         except Exception:
